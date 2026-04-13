@@ -1,0 +1,114 @@
+# Reliability and Anomaly Detection Policy Configuration
+#
+# Defines thresholds for detecting and containing suspicious agent behavior.
+# Implements reliability controls and failure containment.
+
+# Anomaly detection thresholds
+anomaly_detection:
+  repeated_denials:
+    description: "Detect agents repeatedly attempting blocked actions"
+    threshold: 3
+    window_seconds: 60
+    action: QUARANTINE
+    message: "Agent exceeded denial threshold - possible rogue behavior"
+
+  rapid_tool_calls:
+    description: "Detect suspiciously rapid tool invocations"
+    threshold: 10
+    window_seconds: 5
+    action: THROTTLE
+    message: "Agent making too many tool calls too quickly"
+
+  repeated_failures:
+    description: "Detect repeated failures indicating possible issues"
+    threshold: 5
+    window_seconds: 120
+    action: CIRCUIT_BREAK
+    message: "Agent experiencing repeated failures - opening circuit breaker"
+
+  suspicious_patterns:
+    description: "Detect specific suspicious behavior patterns"
+    patterns:
+      - name: "secrets_scanning"
+        pattern: "repeated attempts to access secrets/"
+        threshold: 2
+        action: QUARANTINE
+
+      - name: "privilege_escalation_attempts"
+        pattern: "repeated sudo/su commands"
+        threshold: 2
+        action: QUARANTINE
+
+      - name: "out_of_bounds_access"
+        pattern: "repeated attempts to access files outside workspace"
+        threshold: 3
+        action: CIRCUIT_BREAK
+
+# Circuit breaker configuration
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5
+  timeout_seconds: 300
+  half_open_after_seconds: 60
+  success_threshold_to_close: 3
+
+  states:
+    CLOSED:
+      description: "Normal operation"
+      action: ALLOW
+
+    OPEN:
+      description: "Circuit is open - all requests denied"
+      action: DENY_ALL
+      message: "Circuit breaker is open due to repeated failures"
+
+    HALF_OPEN:
+      description: "Testing if system has recovered"
+      action: ALLOW_LIMITED
+      max_requests: 3
+
+# Rate limiting
+rate_limiting:
+  enabled: true
+  limits:
+    file_read:
+      max_per_minute: 30
+      max_per_hour: 500
+
+    command_execution:
+      max_per_minute: 10
+      max_per_hour: 100
+
+    tool_invocation:
+      max_per_minute: 50
+      max_per_hour: 1000
+
+# Quarantine policy
+quarantine:
+  enabled: true
+  duration_seconds: 600
+  allow_human_review: true
+  notify_on_quarantine: true
+
+  quarantine_actions:
+    - DENY_ALL_OPERATIONS
+    - LOG_ATTEMPT
+    - NOTIFY_ADMIN
+
+# Recovery policy
+recovery:
+  auto_recovery_enabled: true
+  recovery_cooldown_seconds: 300
+  require_human_approval: false
+
+  recovery_conditions:
+    - no_violations_for_seconds: 600
+    - admin_approval: false
+
+# Audit configuration
+audit:
+  log_all_anomalies: true
+  log_rate_limit_hits: true
+  log_circuit_breaker_events: true
+  log_quarantine_events: true
+  alert_on_quarantine: true
