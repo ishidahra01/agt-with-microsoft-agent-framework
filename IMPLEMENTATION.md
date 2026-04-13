@@ -210,7 +210,7 @@ Act 1: ✅ Safe operations allowed
 
 Act 2: ❌ Dangerous operations blocked
   - secrets/.env: DENIED (deny_secrets_access)
-  - sudo cat /etc/passwd: DENIED (default_deny)
+  - sudo cat /etc/passwd: DENIED (deny_privilege_escalation)
   - rm -rf /tmp/*: DENIED (deny_destructive_commands)
 
 Act 3: 🚨 Anomaly detected

@@ -206,7 +206,8 @@ python demo.py act5  # MCP scan
 1. Scan `mcp/safe_config.json` ✅ **PASS**
    - Clean tool definitions
    - Verified author
-   - Risk score: 10/100
+   - Risk score: 0/100
+   - Findings: None detected
 2. Scan `mcp/suspicious_config.json` ❌ **FAIL**
    - Risk score: 100/100
    - Findings:

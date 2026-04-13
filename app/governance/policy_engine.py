@@ -6,7 +6,7 @@ It evaluates file access, command execution, and tool usage requests
 against governance policies BEFORE execution.
 """
 
-import re
+import fnmatch
 import yaml
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -61,22 +61,21 @@ class PolicyEngine:
             )
 
         file_access_rules = self.policies['control_plane'].get('policies', {}).get('file_access', [])
+        normalized_path = Path(file_path).as_posix()
 
         # Check deny rules first (deny takes precedence)
         for rule in file_access_rules:
             if rule.get('action') == 'DENY':
                 patterns = rule.get('patterns', [])
                 for pattern in patterns:
-                    # Convert glob pattern to regex
-                    regex_pattern = pattern.replace('*', '.*')
-                    if re.search(regex_pattern, file_path):
+                    if fnmatch.fnmatch(normalized_path, pattern):
                         result = PolicyResult(
                             decision=PolicyDecision.DENY,
                             rule_name=rule.get('rule', 'unknown'),
                             message=rule.get('message', 'Access denied by policy'),
                             policy_type="file_access",
                             details={
-                                "path": file_path,
+                                "path": normalized_path,
                                 "pattern": pattern,
                                 "description": rule.get('description', '')
                             }
@@ -89,15 +88,14 @@ class PolicyEngine:
             if rule.get('action') == 'ALLOW':
                 patterns = rule.get('patterns', [])
                 for pattern in patterns:
-                    regex_pattern = pattern.replace('*', '.*')
-                    if re.search(regex_pattern, file_path):
+                    if fnmatch.fnmatch(normalized_path, pattern):
                         result = PolicyResult(
                             decision=PolicyDecision.ALLOW,
                             rule_name=rule.get('rule', 'unknown'),
                             message="Access allowed by policy",
                             policy_type="file_access",
                             details={
-                                "path": file_path,
+                                "path": normalized_path,
                                 "pattern": pattern
                             }
                         )
@@ -110,7 +108,7 @@ class PolicyEngine:
             rule_name="default_deny",
             message="File path not in allowed list",
             policy_type="file_access",
-            details={"path": file_path}
+            details={"path": normalized_path}
         )
         self._audit_log(result)
         return result
@@ -118,13 +116,15 @@ class PolicyEngine:
     def check_command_execution(self, command: str) -> PolicyResult:
         """Check if command execution is allowed by policy"""
 
+        normalized_command = command.strip()
+
         if 'control_plane' not in self.policies:
             return PolicyResult(
                 decision=PolicyDecision.ALLOW,
                 rule_name="default",
                 message="No policies loaded",
                 policy_type="command_execution",
-                details={"command": command}
+                details={"command": normalized_command}
             )
 
         cmd_rules = self.policies['control_plane'].get('policies', {}).get('command_execution', [])
@@ -134,15 +134,14 @@ class PolicyEngine:
             if rule.get('action') == 'DENY':
                 patterns = rule.get('patterns', [])
                 for pattern in patterns:
-                    # Simple substring check for command patterns
-                    if pattern in command:
+                    if fnmatch.fnmatch(normalized_command, pattern) or pattern in normalized_command:
                         result = PolicyResult(
                             decision=PolicyDecision.DENY,
                             rule_name=rule.get('rule', 'unknown'),
                             message=rule.get('message', 'Command denied by policy'),
                             policy_type="command_execution",
                             details={
-                                "command": command,
+                                "command": normalized_command,
                                 "pattern": pattern,
                                 "description": rule.get('description', '')
                             }
@@ -155,13 +154,13 @@ class PolicyEngine:
             if rule.get('action') == 'ALLOW':
                 patterns = rule.get('patterns', [])
                 for pattern in patterns:
-                    if pattern.replace('*', '') in command:
+                    if fnmatch.fnmatch(normalized_command, pattern) or pattern in normalized_command:
                         result = PolicyResult(
                             decision=PolicyDecision.ALLOW,
                             rule_name=rule.get('rule', 'unknown'),
                             message="Command allowed by policy",
                             policy_type="command_execution",
-                            details={"command": command}
+                            details={"command": normalized_command}
                         )
                         self._audit_log(result)
                         return result
@@ -172,7 +171,7 @@ class PolicyEngine:
             rule_name="default_deny",
             message="Command not in allowed list",
             policy_type="command_execution",
-            details={"command": command}
+            details={"command": normalized_command}
         )
         self._audit_log(result)
         return result
