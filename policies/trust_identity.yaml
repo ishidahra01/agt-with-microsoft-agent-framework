@@ -1,0 +1,101 @@
+# Trust and Identity Policy Configuration
+#
+# Defines trust levels for agent-to-agent interaction.
+# Implements runtime trust-based access control.
+
+trust_levels:
+  high:
+    score: 90-100
+    description: "Fully trusted agents with verified identity"
+    capabilities:
+      - "read_workspace"
+      - "write_logs"
+      - "delegate_tasks"
+      - "request_human_approval"
+
+  medium:
+    score: 60-89
+    description: "Partially trusted agents with limited capabilities"
+    capabilities:
+      - "read_workspace"
+      - "write_logs"
+
+  low:
+    score: 0-59
+    description: "Untrusted or unverified agents"
+    capabilities:
+      - "read_public_only"
+
+# Agent trust assignments
+agent_trust:
+  workspace-governor:
+    trust_level: high
+    score: 95
+    identity_verified: true
+    capabilities_verified: true
+    description: "Main orchestration agent"
+
+  triage-subagent:
+    trust_level: high
+    score: 90
+    identity_verified: true
+    capabilities_verified: true
+    description: "Read-only analysis subagent"
+
+  executor-subagent:
+    trust_level: medium
+    score: 75
+    identity_verified: true
+    capabilities_verified: true
+    description: "Action-oriented subagent with restricted tools"
+    note: "Lower trust due to action capabilities"
+
+  audit-explainer-subagent:
+    trust_level: high
+    score: 92
+    identity_verified: true
+    capabilities_verified: true
+    description: "Audit analysis and explanation subagent"
+
+  # Mock peer agents for trust demo
+  trusted-peer-helper:
+    trust_level: high
+    score: 88
+    identity_verified: true
+    capabilities_verified: true
+    description: "Trusted peer agent for delegation"
+
+  untrusted-peer-helper:
+    trust_level: low
+    score: 45
+    identity_verified: false
+    capabilities_verified: false
+    description: "Unverified peer agent - should be rejected"
+
+# Delegation rules
+delegation:
+  rules:
+    - name: require_high_trust_for_workspace_access
+      description: "Only high-trust agents can access workspace files"
+      required_trust_level: high
+      required_capabilities:
+        - "read_workspace"
+      action_on_violation: DENY
+
+    - name: require_verified_identity_for_delegation
+      description: "Agent must have verified identity to receive delegated tasks"
+      required_fields:
+        - identity_verified
+      action_on_violation: DENY
+
+    - name: block_untrusted_peers
+      description: "Block delegation to low-trust peers"
+      min_trust_score: 60
+      action_on_violation: DENY
+      message: "Peer agent trust score too low for delegation"
+
+# Audit configuration
+audit:
+  log_trust_decisions: true
+  log_delegation_attempts: true
+  alert_on_trust_violation: true

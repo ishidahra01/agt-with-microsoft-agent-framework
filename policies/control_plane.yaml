@@ -1,0 +1,102 @@
+# Control Plane Policy Configuration
+#
+# This policy defines what actions are allowed/denied before execution.
+# Implements system-enforced control plane governance.
+
+policies:
+  # File access restrictions
+  file_access:
+    - rule: deny_secrets_access
+      description: "Block access to sensitive credential files"
+      action: DENY
+      patterns:
+        - "*/secrets/*"
+        - "*/.env"
+        - "*/credentials/*"
+        - "*.key"
+        - "*.pem"
+      message: "Access to credential files is prohibited by governance policy"
+
+    - rule: deny_outside_workspace
+      description: "Restrict file access to demo workspace only"
+      action: DENY
+      patterns:
+        - "/etc/*"
+        - "/root/*"
+        - "/home/*/.ssh/*"
+        - "../*"
+      message: "Access outside demo workspace is prohibited"
+
+    - rule: allow_workspace_read
+      description: "Allow reading safe workspace files"
+      action: ALLOW
+      patterns:
+        - "demo_workspace/tickets/*"
+        - "demo_workspace/runbooks/*"
+        - "demo_workspace/README.md"
+
+  # Command execution restrictions
+  command_execution:
+    - rule: deny_destructive_commands
+      description: "Block destructive system commands"
+      action: DENY
+      patterns:
+        - "rm -rf"
+        - "dd if=*"
+        - "mkfs*"
+        - "> /dev/*"
+        - "format"
+        - "fdisk"
+      message: "Destructive commands are prohibited by governance policy"
+
+    - rule: deny_privilege_escalation
+      description: "Block privilege escalation attempts"
+      action: DENY
+      patterns:
+        - "sudo *"
+        - "su -*"
+        - "chmod +s*"
+        - "chown root*"
+      message: "Privilege escalation is prohibited"
+
+    - rule: allow_safe_commands
+      description: "Allow safe inspection commands"
+      action: ALLOW
+      patterns:
+        - "ls*"
+        - "cat demo_workspace/*"
+        - "head demo_workspace/*"
+        - "grep*"
+        - "find demo_workspace/*"
+
+  # Tool usage restrictions
+  tool_restrictions:
+    - rule: limit_executor_tools
+      description: "Executor subagent gets minimal tool set"
+      agent: "executor-subagent"
+      allowed_tools:
+        - "read_safe_file"
+        - "list_directory"
+        - "safe_command"
+      denied_tools:
+        - "arbitrary_shell"
+        - "file_write"
+        - "network_access"
+
+    - rule: limit_triage_tools
+      description: "Triage subagent is read-only"
+      agent: "triage-subagent"
+      allowed_tools:
+        - "read_file"
+        - "list_files"
+        - "search_content"
+      denied_tools:
+        - "write_file"
+        - "execute_command"
+        - "network_access"
+
+# Audit configuration
+audit:
+  log_all_denials: true
+  log_all_approvals: true
+  include_stack_trace: true

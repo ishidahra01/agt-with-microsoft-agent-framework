@@ -1,0 +1,55 @@
+{
+  "name": "workspace-utilities",
+  "version": "1.0.0",
+  "description": "Safe utilities for workspace operations",
+  "tools": [
+    {
+      "name": "list_workspace_files",
+      "description": "List files in the workspace directory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path within workspace to list"
+          }
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "read_ticket",
+      "description": "Read a support ticket from the tickets directory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {
+            "type": "string",
+            "description": "Ticket identifier (e.g., TICKET-001)"
+          }
+        },
+        "required": ["ticket_id"]
+      }
+    },
+    {
+      "name": "read_runbook",
+      "description": "Read a runbook document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "runbook_name": {
+            "type": "string",
+            "description": "Name of the runbook file"
+          }
+        },
+        "required": ["runbook_name"]
+      }
+    }
+  ],
+  "metadata": {
+    "author": "IT Operations Team",
+    "verified": true,
+    "last_updated": "2026-04-01",
+    "trust_level": "high"
+  }
+}
