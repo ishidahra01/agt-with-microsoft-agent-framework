@@ -28,7 +28,7 @@ The previous hand-written simulator has been replaced in the runtime path. The l
 - Agent Governance runtime using current installed APIs:
   - control-plane compatibility middleware over the repo YAML policy files
   - AgentMesh audit log
-  - AgentMesh-backed trust metadata and DIDs
+  - AgentMesh-backed dynamic trust state, thresholds, and DIDs
   - Agent SRE anomaly detection and quarantine tracking
   - official Agent OS MCP config scanning
 - Azure Agent Server host adapter creation via `from_agent_framework(...)`
@@ -83,6 +83,10 @@ Running `python app/demo.py demo` exports:
 
 - [artifacts/audit-log.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/audit-log.json)
 - [artifacts/governance-snapshot.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/governance-snapshot.json)
+
+Dynamic trust state is also persisted incrementally at:
+
+- [artifacts/trust-state.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/trust-state.json)
 
 ## Repository focus
 

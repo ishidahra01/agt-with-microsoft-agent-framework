@@ -5,7 +5,7 @@
 
 trust_levels:
   high:
-    score: 90-100
+    score: 700-1000
     description: "Fully trusted agents with verified identity"
     capabilities:
       - "read_workspace"
@@ -14,14 +14,14 @@ trust_levels:
       - "request_human_approval"
 
   medium:
-    score: 60-89
+    score: 500-699
     description: "Partially trusted agents with limited capabilities"
     capabilities:
       - "read_workspace"
       - "write_logs"
 
   low:
-    score: 0-59
+    score: 0-499
     description: "Untrusted or unverified agents"
     capabilities:
       - "read_public_only"
@@ -30,21 +30,21 @@ trust_levels:
 agent_trust:
   workspace-governor:
     trust_level: high
-    score: 95
+    score: 950
     identity_verified: true
     capabilities_verified: true
     description: "Main orchestration agent"
 
   triage-subagent:
     trust_level: high
-    score: 90
+    score: 900
     identity_verified: true
     capabilities_verified: true
     description: "Read-only analysis subagent"
 
   executor-subagent:
     trust_level: medium
-    score: 75
+    score: 650
     identity_verified: true
     capabilities_verified: true
     description: "Action-oriented subagent with restricted tools"
@@ -52,7 +52,7 @@ agent_trust:
 
   audit-explainer-subagent:
     trust_level: high
-    score: 92
+    score: 920
     identity_verified: true
     capabilities_verified: true
     description: "Audit analysis and explanation subagent"
@@ -60,14 +60,14 @@ agent_trust:
   # Mock peer agents for trust demo
   trusted-peer-helper:
     trust_level: high
-    score: 88
+    score: 880
     identity_verified: true
     capabilities_verified: true
     description: "Trusted peer agent for delegation"
 
   untrusted-peer-helper:
     trust_level: low
-    score: 45
+    score: 250
     identity_verified: false
     capabilities_verified: false
     description: "Unverified peer agent - should be rejected"
@@ -90,7 +90,7 @@ delegation:
 
     - name: block_untrusted_peers
       description: "Block delegation to low-trust peers"
-      min_trust_score: 60
+      min_trust_score: 600
       action_on_violation: DENY
       message: "Peer agent trust score too low for delegation"
 

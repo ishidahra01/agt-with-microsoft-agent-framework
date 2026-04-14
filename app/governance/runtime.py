@@ -5,6 +5,7 @@ import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,79 @@ class TrustDecision:
     identity_verified: bool
     reason: str
     did: str | None = None
+
+
+TRUST_SCORE_MAX = 1000
+TRUST_SCORE_DEFAULT = 500
+TRUST_SCORE_FLOOR = 100
+TRUST_WARNING_THRESHOLD = 500
+TRUST_REVOCATION_THRESHOLD = 300
+TRUST_DECAY_POINTS_PER_HOUR = 2.0
+TRUST_EMA_ALPHA = 0.2
+TRUST_DIMENSION_WEIGHTS = {
+    "policy_compliance": 0.25,
+    "security_posture": 0.25,
+    "output_quality": 0.20,
+    "resource_efficiency": 0.15,
+    "collaboration_health": 0.15,
+}
+TRUST_TIER_THRESHOLDS = [
+    (900, "verified_partner"),
+    (700, "trusted"),
+    (500, "standard"),
+    (300, "probationary"),
+    (0, "untrusted"),
+]
+
+
+@dataclass
+class TrustState:
+    agent_name: str
+    total_score: int
+    tier: str
+    identity_verified: bool
+    dimensions: dict[str, float]
+    event_count: int = 0
+    previous_score: int | None = None
+    score_change: int = 0
+    last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_positive_signal_at: str | None = None
+    last_event: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent_name": self.agent_name,
+            "total_score": self.total_score,
+            "tier": self.tier,
+            "identity_verified": self.identity_verified,
+            "dimensions": self.dimensions,
+            "event_count": self.event_count,
+            "previous_score": self.previous_score,
+            "score_change": self.score_change,
+            "last_updated": self.last_updated,
+            "last_positive_signal_at": self.last_positive_signal_at,
+            "last_event": self.last_event,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TrustState":
+        dimensions = {
+            name: float(payload.get("dimensions", {}).get(name, 50.0))
+            for name in TRUST_DIMENSION_WEIGHTS
+        }
+        return cls(
+            agent_name=str(payload.get("agent_name", "unknown")),
+            total_score=int(payload.get("total_score", TRUST_SCORE_DEFAULT)),
+            tier=str(payload.get("tier", "standard")),
+            identity_verified=bool(payload.get("identity_verified", False)),
+            dimensions=dimensions,
+            event_count=int(payload.get("event_count", 0)),
+            previous_score=payload.get("previous_score"),
+            score_change=int(payload.get("score_change", 0)),
+            last_updated=str(payload.get("last_updated", datetime.now(timezone.utc).isoformat())),
+            last_positive_signal_at=payload.get("last_positive_signal_at"),
+            last_event=dict(payload.get("last_event", {})),
+        )
 
 
 class ControlPlanePolicy:
@@ -123,33 +197,270 @@ class ControlPlanePolicy:
 
 
 class TrustRegistry:
-    TRUST_ORDER = {"low": 0, "medium": 1, "high": 2}
+    TRUST_ORDER = {
+        "low": 0,
+        "medium": 1,
+        "high": 2,
+        "untrusted": 0,
+        "probationary": 1,
+        "standard": 2,
+        "trusted": 3,
+        "verified_partner": 4,
+    }
 
-    def __init__(self, trust_path: Path, audit_log: AuditLog):
+    def __init__(self, trust_path: Path, audit_log: AuditLog, storage_path: Path | None = None):
         payload = _read_yaml(trust_path)
         self.trust_levels = payload.get("trust_levels", {})
         self.agent_trust = payload.get("agent_trust", {})
         self.delegation_rules = payload.get("delegation", {}).get("rules", [])
         self.audit_log = audit_log
+        self.storage_path = storage_path or trust_path.parent.parent / "artifacts" / "trust-state.json"
+        self.state = self._load_state()
         self.clients = {
             agent_name: AgentMeshClient(
                 agent_name,
                 capabilities=self._capabilities_for(agent_name),
-                trust_config={"initial_score": int(agent.get("score", 50))},
+                trust_config={"initial_score": self._state_for(agent_name).total_score},
             )
             for agent_name, agent in self.agent_trust.items()
         }
+        self._persist_state()
+
+    def _load_state(self) -> dict[str, TrustState]:
+        raw_agents: dict[str, Any] = {}
+        if self.storage_path.exists():
+            try:
+                raw_payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
+                raw_agents = dict(raw_payload.get("agents", {}))
+            except (json.JSONDecodeError, OSError):
+                raw_agents = {}
+
+        state: dict[str, TrustState] = {}
+        for agent_name in self.agent_trust:
+            if agent_name in raw_agents:
+                state[agent_name] = TrustState.from_dict(raw_agents[agent_name])
+            else:
+                state[agent_name] = self._bootstrap_state(agent_name)
+        return state
+
+    def _persist_state(self) -> None:
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "agents": {agent_name: trust_state.to_dict() for agent_name, trust_state in self.state.items()},
+        }
+        self.storage_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _normalize_seed_score(self, raw_score: Any, configured_level: str | None) -> int:
+        if raw_score is None:
+            defaults = {"high": 850, "medium": 600, "low": 250}
+            return defaults.get(str(configured_level or "").lower(), TRUST_SCORE_DEFAULT)
+        score = int(raw_score)
+        if score <= 100:
+            return max(0, min(TRUST_SCORE_MAX, score * 10))
+        return max(0, min(TRUST_SCORE_MAX, score))
+
+    def _normalize_threshold(self, raw_threshold: Any) -> int:
+        if raw_threshold is None:
+            return TRUST_SCORE_DEFAULT
+        value = int(raw_threshold)
+        if value <= 100:
+            return value * 10
+        return value
+
+    def _tier_for_score(self, score: int) -> str:
+        for threshold, tier in TRUST_TIER_THRESHOLDS:
+            if score >= threshold:
+                return tier
+        return "untrusted"
+
+    def _capability_band_for_score(self, score: int) -> str:
+        if score >= 700:
+            return "high"
+        if score >= 500:
+            return "medium"
+        return "low"
+
+    def _bootstrap_state(self, agent_name: str) -> TrustState:
+        config = self.agent_trust.get(agent_name, {})
+        seed_score = self._normalize_seed_score(config.get("score"), str(config.get("trust_level", "medium")))
+        dimension_seed = round(seed_score / 10.0, 2)
+        dimensions = {name: dimension_seed for name in TRUST_DIMENSION_WEIGHTS}
+        now = datetime.now(timezone.utc).isoformat()
+        return TrustState(
+            agent_name=agent_name,
+            total_score=seed_score,
+            tier=self._tier_for_score(seed_score),
+            identity_verified=bool(config.get("identity_verified", False)),
+            dimensions=dimensions,
+            last_updated=now,
+            last_positive_signal_at=now if seed_score >= TRUST_WARNING_THRESHOLD else None,
+            last_event={"type": "bootstrap", "reason": "initialized from trust policy"},
+        )
+
+    def _state_for(self, agent_name: str, *, apply_decay: bool = True) -> TrustState:
+        if agent_name not in self.state:
+            self.state[agent_name] = self._bootstrap_state(agent_name)
+        trust_state = self.state[agent_name]
+        if apply_decay:
+            self._apply_decay(trust_state)
+        return trust_state
+
+    def _compute_total(self, dimensions: dict[str, float]) -> int:
+        weighted = sum(dimensions[name] * TRUST_DIMENSION_WEIGHTS[name] for name in TRUST_DIMENSION_WEIGHTS)
+        return max(0, min(TRUST_SCORE_MAX, int(round(weighted * 10))))
+
+    def _scale_dimensions_to_score(self, dimensions: dict[str, float], previous_total: int, new_total: int) -> None:
+        if previous_total <= 0:
+            normalized = max(0.0, min(100.0, new_total / 10.0))
+            for name in dimensions:
+                dimensions[name] = round(normalized, 2)
+            return
+        factor = new_total / previous_total
+        for name, value in dimensions.items():
+            dimensions[name] = round(max(0.0, min(100.0, value * factor)), 2)
+
+    def _apply_decay(self, trust_state: TrustState) -> None:
+        try:
+            last_updated = datetime.fromisoformat(trust_state.last_updated)
+        except ValueError:
+            last_updated = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        hours_elapsed = max(0.0, (now - last_updated).total_seconds() / 3600.0)
+        if hours_elapsed < 1.0 or trust_state.total_score <= TRUST_SCORE_FLOOR:
+            return
+        decay_points = int(hours_elapsed * TRUST_DECAY_POINTS_PER_HOUR)
+        if decay_points <= 0:
+            return
+        previous_total = trust_state.total_score
+        trust_state.total_score = max(TRUST_SCORE_FLOOR, trust_state.total_score - decay_points)
+        self._scale_dimensions_to_score(trust_state.dimensions, previous_total, trust_state.total_score)
+        trust_state.previous_score = previous_total
+        trust_state.score_change = trust_state.total_score - previous_total
+        trust_state.tier = self._tier_for_score(trust_state.total_score)
+        trust_state.last_updated = now.isoformat()
+        trust_state.last_event = {
+            "type": "decay",
+            "reason": f"{decay_points} points decayed after {hours_elapsed:.2f} idle hours",
+        }
+        self._persist_state()
+
+    def _record_signal(
+        self,
+        agent_name: str,
+        event_type: str,
+        reason: str,
+        dimension_signals: dict[str, float],
+        *,
+        positive: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> TrustState:
+        trust_state = self._state_for(agent_name)
+        previous_total = trust_state.total_score
+        for dimension_name, signal_value in dimension_signals.items():
+            if dimension_name not in trust_state.dimensions:
+                continue
+            bounded_signal = max(0.0, min(100.0, signal_value))
+            current_value = trust_state.dimensions[dimension_name]
+            trust_state.dimensions[dimension_name] = round(
+                (current_value * (1.0 - TRUST_EMA_ALPHA)) + (bounded_signal * TRUST_EMA_ALPHA),
+                2,
+            )
+        trust_state.total_score = self._compute_total(trust_state.dimensions)
+        trust_state.tier = self._tier_for_score(trust_state.total_score)
+        trust_state.previous_score = previous_total
+        trust_state.score_change = trust_state.total_score - previous_total
+        trust_state.event_count += 1
+        trust_state.last_updated = datetime.now(timezone.utc).isoformat()
+        if positive:
+            trust_state.last_positive_signal_at = trust_state.last_updated
+        trust_state.last_event = {
+            "type": event_type,
+            "reason": reason,
+            "metadata": metadata or {},
+        }
+        self._persist_state()
+        return trust_state
 
     def _capabilities_for(self, agent_name: str) -> list[str]:
-        agent = self.agent_trust.get(agent_name, {})
-        level = str(agent.get("trust_level", "low"))
+        trust_state = self._state_for(agent_name)
+        level = self._capability_band_for_score(trust_state.total_score)
         return list(self.trust_levels.get(level, {}).get("capabilities", []))
 
+    def record_policy_violation(self, agent_name: str, reason: str) -> TrustState:
+        return self._record_signal(
+            agent_name,
+            "policy_violation",
+            reason,
+            {
+                "policy_compliance": 5,
+                "security_posture": 15,
+                "collaboration_health": 20,
+            },
+            positive=False,
+        )
+
+    def record_tool_invocation(self, agent_name: str, tool_name: str) -> TrustState:
+        return self._record_signal(
+            agent_name,
+            "tool_invocation",
+            f"safe tool invocation: {tool_name}",
+            {
+                "resource_efficiency": 75,
+                "collaboration_health": 70,
+            },
+            positive=True,
+            metadata={"tool_name": tool_name},
+        )
+
+    def record_execution_result(self, agent_name: str, *, success: bool, detail: str) -> TrustState:
+        return self._record_signal(
+            agent_name,
+            "execution_result",
+            detail,
+            {
+                "output_quality": 85 if success else 25,
+                "collaboration_health": 80 if success else 30,
+                "security_posture": 70 if success else 35,
+            },
+            positive=success,
+        )
+
+    def record_quarantine(self, agent_name: str, reason: str) -> TrustState:
+        return self._record_signal(
+            agent_name,
+            "quarantine",
+            reason,
+            {
+                "policy_compliance": 0,
+                "security_posture": 0,
+                "collaboration_health": 10,
+            },
+            positive=False,
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            agent_name: {
+                "score": trust_state.total_score,
+                "tier": trust_state.tier,
+                "capability_band": self._capability_band_for_score(trust_state.total_score),
+                "identity_verified": trust_state.identity_verified,
+                "dimensions": trust_state.dimensions,
+                "event_count": trust_state.event_count,
+                "score_change": trust_state.score_change,
+                "last_updated": trust_state.last_updated,
+                "last_event": trust_state.last_event,
+            }
+            for agent_name, trust_state in self.state.items()
+        }
+
     def check_delegation(self, requester: str, peer_agent: str, required_capabilities: list[str]) -> TrustDecision:
-        agent = self.agent_trust.get(peer_agent, {})
-        trust_level = str(agent.get("trust_level", "low"))
-        trust_score = int(agent.get("score", 0))
-        identity_verified = bool(agent.get("identity_verified", False))
+        trust_state = self._state_for(peer_agent)
+        trust_level = trust_state.tier
+        trust_score = trust_state.total_score
+        identity_verified = trust_state.identity_verified
         did = None
         if peer_agent in self.clients:
             did = self.clients[peer_agent].agent_did
@@ -159,7 +470,7 @@ class TrustRegistry:
 
         for rule in self.delegation_rules:
             min_trust_score = rule.get("min_trust_score")
-            if min_trust_score is not None and trust_score < int(min_trust_score):
+            if min_trust_score is not None and trust_score < self._normalize_threshold(min_trust_score):
                 allowed = False
                 reason = rule.get("message") or rule.get("description", "Trust score too low")
                 break
@@ -184,6 +495,21 @@ class TrustRegistry:
                     reason = rule.get("description", "Peer agent is missing required capabilities")
                     break
 
+        updated_state = self._record_signal(
+            peer_agent,
+            "delegation_check",
+            reason,
+            {
+                "collaboration_health": 95 if allowed else 5,
+                "policy_compliance": 95 if allowed else 10,
+            },
+            positive=allowed,
+            metadata={
+                "requester": requester,
+                "required_capabilities": required_capabilities,
+            },
+        )
+
         self.audit_log.log(
             event_type="trust_handshake",
             agent_did=requester,
@@ -202,8 +528,8 @@ class TrustRegistry:
         return TrustDecision(
             allowed=allowed,
             agent_name=peer_agent,
-            trust_level=trust_level,
-            trust_score=trust_score,
+            trust_level=updated_state.tier,
+            trust_score=updated_state.total_score,
             identity_verified=identity_verified,
             reason=reason,
             did=did,
@@ -274,11 +600,13 @@ class ReliabilityMonitor:
 
 
 class AuditTrailMiddleware(AgentMiddleware):
-    def __init__(self, audit_log: AuditLog, agent_id: str):
+    def __init__(self, audit_log: AuditLog, trust_registry: TrustRegistry, agent_id: str):
         self.audit_log = audit_log
+        self.trust_registry = trust_registry
         self.agent_id = agent_id
 
     async def process(self, context: AgentContext, call_next):
+        completed = False
         entry = self.audit_log.log(
             event_type="agent_invocation",
             agent_did=self.agent_id,
@@ -291,6 +619,14 @@ class AuditTrailMiddleware(AgentMiddleware):
             metadata["audit_entry_id"] = entry.entry_id
         try:
             await call_next()
+            completed = True
+        except Exception:
+            self.trust_registry.record_execution_result(
+                self.agent_id,
+                success=False,
+                detail="agent invocation failed or was interrupted",
+            )
+            raise
         finally:
             self.audit_log.log(
                 event_type="agent_invocation",
@@ -299,13 +635,20 @@ class AuditTrailMiddleware(AgentMiddleware):
                 data={"start_entry_id": entry.entry_id},
                 outcome="success",
             )
+            if completed:
+                self.trust_registry.record_execution_result(
+                    self.agent_id,
+                    success=True,
+                    detail="agent invocation completed",
+                )
 
 
 class ControlPlaneMiddleware(AgentMiddleware):
-    def __init__(self, policy: ControlPlanePolicy, audit_log: AuditLog, reliability: ReliabilityMonitor, agent_id: str):
+    def __init__(self, policy: ControlPlanePolicy, audit_log: AuditLog, reliability: ReliabilityMonitor, trust_registry: TrustRegistry, agent_id: str):
         self.policy = policy
         self.audit_log = audit_log
         self.reliability = reliability
+        self.trust_registry = trust_registry
         self.agent_id = agent_id
 
     async def process(self, context: AgentContext, call_next):
@@ -322,24 +665,31 @@ class ControlPlaneMiddleware(AgentMiddleware):
             policy_decision="allow" if decision.allowed else "deny",
         )
         if not decision.allowed:
-            self.reliability.record_denial(self.agent_id, decision.reason)
+            result = self.reliability.record_denial(self.agent_id, decision.reason)
+            self.trust_registry.record_policy_violation(self.agent_id, decision.reason)
+            if result.get("detected"):
+                self.trust_registry.record_quarantine(self.agent_id, decision.reason)
             context.result = AgentResponse(messages=[Message(role="assistant", text=f"Governance blocked the request: {decision.reason}")])
             raise MiddlewareTermination(decision.reason)
         await call_next()
 
 
 class CapabilityGuardMiddleware(FunctionMiddleware):
-    def __init__(self, policy: ControlPlanePolicy, audit_log: AuditLog, reliability: ReliabilityMonitor, agent_id: str):
+    def __init__(self, policy: ControlPlanePolicy, audit_log: AuditLog, reliability: ReliabilityMonitor, trust_registry: TrustRegistry, agent_id: str):
         self.policy = policy
         self.audit_log = audit_log
         self.reliability = reliability
+        self.trust_registry = trust_registry
         self.agent_id = agent_id
 
     async def process(self, context: FunctionInvocationContext, call_next):
         tool_name = getattr(getattr(context, "function", None), "name", "unknown")
         decision = self.policy.check_tool(self.agent_id, tool_name)
         if not decision.allowed:
-            self.reliability.record_denial(self.agent_id, decision.reason)
+            result = self.reliability.record_denial(self.agent_id, decision.reason)
+            self.trust_registry.record_policy_violation(self.agent_id, decision.reason)
+            if result.get("detected"):
+                self.trust_registry.record_quarantine(self.agent_id, decision.reason)
             context.result = f"Governance blocked tool use: {decision.reason}"
             raise MiddlewareTermination(decision.reason)
         self.audit_log.log(
@@ -351,6 +701,7 @@ class CapabilityGuardMiddleware(FunctionMiddleware):
             outcome="success",
         )
         self.reliability.record_tool_call(self.agent_id, tool_name)
+        self.trust_registry.record_tool_invocation(self.agent_id, tool_name)
         await call_next()
 
 
@@ -359,14 +710,18 @@ class GovernanceRuntime:
         self.repo_root = repo_root
         self.audit_log = AuditLog()
         self.control_plane = ControlPlanePolicy(repo_root / "policies" / "control_plane.yaml")
-        self.trust_registry = TrustRegistry(repo_root / "policies" / "trust_identity.yaml", self.audit_log)
+        self.trust_registry = TrustRegistry(
+            repo_root / "policies" / "trust_identity.yaml",
+            self.audit_log,
+            repo_root / "artifacts" / "trust-state.json",
+        )
         self.reliability = ReliabilityMonitor(repo_root / "policies" / "reliability.yaml", self.audit_log)
 
     def middleware_for(self, agent_id: str) -> list[Any]:
         return [
-            AuditTrailMiddleware(self.audit_log, agent_id),
-            ControlPlaneMiddleware(self.control_plane, self.audit_log, self.reliability, agent_id),
-            CapabilityGuardMiddleware(self.control_plane, self.audit_log, self.reliability, agent_id),
+            AuditTrailMiddleware(self.audit_log, self.trust_registry, agent_id),
+            ControlPlaneMiddleware(self.control_plane, self.audit_log, self.reliability, self.trust_registry, agent_id),
+            CapabilityGuardMiddleware(self.control_plane, self.audit_log, self.reliability, self.trust_registry, agent_id),
         ]
 
     def scan_mcp(self, config_path: str | Path) -> list[SecurityFinding]:
@@ -382,13 +737,6 @@ class GovernanceRuntime:
     def governance_snapshot(self) -> dict[str, Any]:
         return {
             "audit_entries": len(self.audit_log.export()),
-            "trusted_agents": {
-                agent_name: {
-                    "score": info.get("score"),
-                    "trust_level": info.get("trust_level"),
-                    "identity_verified": info.get("identity_verified"),
-                }
-                for agent_name, info in self.trust_registry.agent_trust.items()
-            },
+            "trusted_agents": self.trust_registry.snapshot(),
             "reliability": self.reliability.summary(),
         }

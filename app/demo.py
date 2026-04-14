@@ -163,16 +163,59 @@ class LiveGovernedWorkspaceDemo:
     def _fail(self, text: str) -> None:
         print(f"{Fore.RED}BLOCK{Style.RESET_ALL} {text}")
 
+    def _trust_snapshot(self, *agent_names: str) -> dict[str, dict[str, Any]]:
+        snapshot = self.runtime.governance_snapshot().get("trusted_agents", {})
+        if agent_names:
+            return {agent_name: snapshot.get(agent_name, {}) for agent_name in agent_names}
+        return snapshot
+
+    def _print_trust_summary(self, title: str, *agent_names: str) -> None:
+        snapshot = self._trust_snapshot(*agent_names)
+        self._info(title)
+        for agent_name, state in snapshot.items():
+            if not state:
+                self._warn(f"{agent_name}: trust state unavailable")
+                continue
+            score = state.get("score")
+            tier = state.get("tier")
+            delta = state.get("score_change", 0)
+            last_event = state.get("last_event", {}).get("type", "none")
+            self._info(f"- {agent_name}: score={score} tier={tier} delta={delta:+} last_event={last_event}")
+
+    def _print_trust_delta(self, title: str, before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]) -> None:
+        self._info(title)
+        for agent_name, after_state in after.items():
+            before_state = before.get(agent_name, {})
+            if not after_state:
+                self._warn(f"- {agent_name}: trust state unavailable")
+                continue
+            before_score = int(before_state.get("score", after_state.get("score", 0)))
+            after_score = int(after_state.get("score", before_score))
+            change = after_score - before_score
+            tier = after_state.get("tier")
+            last_event = after_state.get("last_event", {}).get("type", "none")
+            line = f"- {agent_name}: {before_score} -> {after_score} ({change:+}) tier={tier} last_event={last_event}"
+            if change > 0:
+                self._ok(line)
+            elif change < 0:
+                self._warn(line)
+            else:
+                self._info(line)
+
     def _build_workspace_mcp_server(self):
         @tool("list_workspace_files", "List files below demo_workspace.", {"path": str})
         async def list_workspace_files(args: dict[str, Any]) -> dict[str, Any]:
             requested = WORKSPACE_DIR / str(args["path"])
             decision = self.runtime.control_plane.check_file_access(requested)
             if not decision.allowed:
-                self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                result = self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                self.runtime.trust_registry.record_policy_violation("workspace-mcp", decision.reason)
+                if result.get("detected"):
+                    self.runtime.trust_registry.record_quarantine("workspace-mcp", decision.reason)
                 return {"content": [{"type": "text", "text": decision.reason}], "is_error": True}
             if not requested.exists():
                 return {"content": [{"type": "text", "text": f"Path not found: {requested}"}], "is_error": True}
+            self.runtime.trust_registry.record_tool_invocation("workspace-mcp", "list_workspace_files")
             children = sorted(str(item.relative_to(REPO_ROOT)).replace("\\", "/") for item in requested.iterdir())
             return {"content": [{"type": "text", "text": "\n".join(children) or "(empty)"}]}
 
@@ -181,8 +224,12 @@ class LiveGovernedWorkspaceDemo:
             target = WORKSPACE_DIR / "tickets" / f"{args['ticket_id']}.md"
             decision = self.runtime.control_plane.check_file_access(target)
             if not decision.allowed:
-                self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                result = self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                self.runtime.trust_registry.record_policy_violation("workspace-mcp", decision.reason)
+                if result.get("detected"):
+                    self.runtime.trust_registry.record_quarantine("workspace-mcp", decision.reason)
                 return {"content": [{"type": "text", "text": decision.reason}], "is_error": True}
+            self.runtime.trust_registry.record_tool_invocation("workspace-mcp", "read_ticket")
             return {"content": [{"type": "text", "text": target.read_text(encoding='utf-8')}]} 
 
         @tool("read_runbook", "Read a runbook from demo_workspace/runbooks.", {"runbook_name": str})
@@ -190,8 +237,12 @@ class LiveGovernedWorkspaceDemo:
             target = WORKSPACE_DIR / "runbooks" / str(args["runbook_name"])
             decision = self.runtime.control_plane.check_file_access(target)
             if not decision.allowed:
-                self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                result = self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                self.runtime.trust_registry.record_policy_violation("workspace-mcp", decision.reason)
+                if result.get("detected"):
+                    self.runtime.trust_registry.record_quarantine("workspace-mcp", decision.reason)
                 return {"content": [{"type": "text", "text": decision.reason}], "is_error": True}
+            self.runtime.trust_registry.record_tool_invocation("workspace-mcp", "read_runbook")
             return {"content": [{"type": "text", "text": target.read_text(encoding='utf-8')}]} 
 
         @tool("governance_snapshot", "Return the current audit, trust, and reliability snapshot.", {})
@@ -221,7 +272,10 @@ class LiveGovernedWorkspaceDemo:
         async def can_use_tool(tool_name: str, tool_args: dict[str, Any], _context: Any):
             policy_decision = self.runtime.control_plane.check_tool(agent_name, tool_name)
             if not policy_decision.allowed:
-                self.runtime.reliability.record_denial(agent_name, policy_decision.reason)
+                result = self.runtime.reliability.record_denial(agent_name, policy_decision.reason)
+                self.runtime.trust_registry.record_policy_violation(agent_name, policy_decision.reason)
+                if result.get("detected"):
+                    self.runtime.trust_registry.record_quarantine(agent_name, policy_decision.reason)
                 return PermissionResultDeny(message=policy_decision.reason, interrupt=True)
 
             if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
@@ -229,17 +283,24 @@ class LiveGovernedWorkspaceDemo:
                 if candidate:
                     decision = self.runtime.control_plane.check_file_access(str(candidate))
                     if not decision.allowed:
-                        self.runtime.reliability.record_denial(agent_name, decision.reason)
+                        result = self.runtime.reliability.record_denial(agent_name, decision.reason)
+                        self.runtime.trust_registry.record_policy_violation(agent_name, decision.reason)
+                        if result.get("detected"):
+                            self.runtime.trust_registry.record_quarantine(agent_name, decision.reason)
                         return PermissionResultDeny(message=decision.reason, interrupt=True)
 
             if tool_name == "Bash":
                 command = str(tool_args.get("command", ""))
                 decision = self.runtime.control_plane.check_command(command)
                 if not decision.allowed:
-                    self.runtime.reliability.record_denial(agent_name, decision.reason)
+                    result = self.runtime.reliability.record_denial(agent_name, decision.reason)
+                    self.runtime.trust_registry.record_policy_violation(agent_name, decision.reason)
+                    if result.get("detected"):
+                        self.runtime.trust_registry.record_quarantine(agent_name, decision.reason)
                     return PermissionResultDeny(message=decision.reason, interrupt=True)
 
             self.runtime.reliability.record_tool_call(agent_name, tool_name)
+            self.runtime.trust_registry.record_tool_invocation(agent_name, tool_name)
             return PermissionResultAllow()
 
         return can_use_tool
@@ -445,6 +506,8 @@ class LiveGovernedWorkspaceDemo:
 
     def act2_control_plane(self) -> None:
         self._header("Act 2: Control Plane")
+        trust_before = self._trust_snapshot("workspace-governor")
+        self._print_trust_summary("Trust before policy evaluation", "workspace-governor")
         prompt = "Please sudo cat /etc/passwd and read demo_workspace/secrets/.env"
         prompt_decision = self.runtime.control_plane.check_prompt("workspace-governor", prompt)
         file_decision = self.runtime.control_plane.check_file_access(REPO_ROOT / "demo_workspace" / "secrets" / ".env")
@@ -453,17 +516,23 @@ class LiveGovernedWorkspaceDemo:
             if decision.allowed:
                 self._warn(f"{label}: {decision.reason}")
             else:
+                self.runtime.trust_registry.record_policy_violation("workspace-governor", f"act2 {label}: {decision.reason}")
                 self._fail(f"{label}: {decision.reason} ({decision.matched_rule})")
+        trust_after = self._trust_snapshot("workspace-governor")
+        self._print_trust_delta("Trust after blocked policy checks", trust_before, trust_after)
 
     def act3_reliability(self) -> None:
         self._header("Act 3: Reliability")
         for attempt in range(1, 4):
             result = self.runtime.reliability.record_denial("executor-subagent", "repeated secret access")
+            self.runtime.trust_registry.record_policy_violation("executor-subagent", "repeated secret access")
             if result.get("detected"):
+                self.runtime.trust_registry.record_quarantine("executor-subagent", "repeated secret access")
                 self._fail(f"Attempt {attempt}: quarantine triggered with count={result['count']}")
                 break
             self._warn(f"Attempt {attempt}: denial recorded")
         alert = self.runtime.reliability.record_tool_call("executor-subagent", "Read")
+        self.runtime.trust_registry.record_tool_invocation("executor-subagent", "Read")
         self._ok(f"Tool sequence baseline updated. Alert={bool(alert)}")
 
     def act4_trust(self) -> None:
@@ -488,6 +557,9 @@ class LiveGovernedWorkspaceDemo:
 
     async def act1_live_workflow(self, prompt: str) -> None:
         self._header("Act 1: Live Workflow")
+        tracked_agents = ("workspace-governor", "triage-subagent", "executor-subagent", "audit-explainer-subagent")
+        trust_before = self._trust_snapshot(*tracked_agents)
+        self._print_trust_summary("Trust before workflow", *tracked_agents)
         if not self.claude_runtime_ready():
             self._warn("Foundry target was not configured. Set ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_FOUNDRY_BASE_URL. Running smoke-test only.")
             smoke = self.smoke_test()
@@ -501,6 +573,9 @@ class LiveGovernedWorkspaceDemo:
             print(json.dumps(self.smoke_test(), indent=2, default=str))
             return
         self._ok("Workflow completed")
+        trust_after = self._trust_snapshot(*tracked_agents)
+        self._print_trust_delta("Trust after workflow", trust_before, trust_after)
+        self._print_trust_summary("Current trust snapshot", *tracked_agents)
         print(text)
 
     def export_artifacts(self) -> None:
