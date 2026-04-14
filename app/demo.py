@@ -1,539 +1,570 @@
 #!/usr/bin/env python3
-"""
-Governed Multi-Agent Workspace Assistant Demo
+from __future__ import annotations
 
-This demo showcases Agent Governance Toolkit integration with
-Microsoft Agent Framework + Claude Agent SDK.
-
-It demonstrates four key governance values:
-1. System-enforced control plane
-2. Runtime trust-based delegation
-3. Reliability and anomaly containment
-4. MCP-era safety scanning
-"""
-
-import sys
+import argparse
+import asyncio
+from contextlib import suppress
+import json
+import logging
 import os
 from pathlib import Path
-from colorama import init, Fore, Style
-import json
+from typing import Any
 
-# Add app directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+import agent_framework as agent_framework_module
+from agent_framework import WorkflowAgent, WorkflowBuilder
+from agent_framework_claude import ClaudeAgent
+from azure.ai.agentserver.agentframework import from_agent_framework
+from claude_agent_sdk import create_sdk_mcp_server, tool
+from claude_agent_sdk.types import AgentDefinition, HookMatcher, PermissionResultAllow, PermissionResultDeny
+from dotenv import load_dotenv
+from colorama import Fore, Style, init
 
-from governance import (
-    PolicyEngine,
-    PolicyDecision,
-    TrustSystem,
-    TrustLevel,
-    ReliabilityMonitor,
-    AnomalyAction,
-    MCPScanner
-)
-
-# Initialize colorama for cross-platform colored output
-init()
+from governance import GovernanceRuntime
 
 
-class DemoRunner:
-    """Orchestrates the 5-act governance demo"""
+init(autoreset=True)
 
-    def __init__(self):
-        self.policy_engine = PolicyEngine(policy_dir="policies")
-        self.trust_system = TrustSystem(policy_dir="policies")
-        self.reliability_monitor = ReliabilityMonitor(policy_dir="policies")
-        self.mcp_scanner = MCPScanner()
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ARTIFACTS_DIR = REPO_ROOT / "artifacts"
+WORKSPACE_DIR = REPO_ROOT / "demo_workspace"
+LOGGER = logging.getLogger("governed_workspace_demo")
+DEFAULT_PORT = 8088
+FOUNDRY_MODEL_PIN_KEYS = [
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+]
+VALID_EFFORT_LEVELS = {"low", "medium", "high", "max", "auto"}
 
-        self.current_agent = "workspace-governor"
 
-    def print_header(self, text: str):
-        """Print a section header"""
-        print(f"\n{Fore.CYAN}{'═' * 80}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}{text:^80}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}{'═' * 80}{Style.RESET_ALL}\n")
+if not hasattr(agent_framework_module, "BaseContextProvider") and hasattr(agent_framework_module, "ContextProvider"):
+    agent_framework_module.BaseContextProvider = agent_framework_module.ContextProvider
+if not hasattr(agent_framework_module, "ContextProvider") and hasattr(agent_framework_module, "BaseContextProvider"):
+    agent_framework_module.ContextProvider = agent_framework_module.BaseContextProvider
+if not hasattr(agent_framework_module, "BaseHistoryProvider") and hasattr(agent_framework_module, "HistoryProvider"):
+    agent_framework_module.BaseHistoryProvider = agent_framework_module.HistoryProvider
+if not hasattr(agent_framework_module, "HistoryProvider") and hasattr(agent_framework_module, "BaseHistoryProvider"):
+    agent_framework_module.HistoryProvider = agent_framework_module.BaseHistoryProvider
 
-    def print_subheader(self, text: str):
-        """Print a subsection header"""
-        print(f"\n{Fore.YELLOW}{'─' * 80}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}{text}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}{'─' * 80}{Style.RESET_ALL}")
 
-    def print_success(self, text: str):
-        """Print success message"""
-        print(f"{Fore.GREEN}✅ {text}{Style.RESET_ALL}")
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
-    def print_error(self, text: str):
-        """Print error/denial message"""
-        print(f"{Fore.RED}❌ {text}{Style.RESET_ALL}")
 
-    def print_info(self, text: str):
-        """Print info message"""
-        print(f"{Fore.BLUE}ℹ️  {text}{Style.RESET_ALL}")
+def _resolve_port(default: int = DEFAULT_PORT) -> int:
+    raw = os.getenv("PORT")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        LOGGER.warning("Invalid PORT=%r. Falling back to %s.", raw, default)
+        return default
 
-    def print_warning(self, text: str):
-        """Print warning message"""
-        print(f"{Fore.YELLOW}⚠️  {text}{Style.RESET_ALL}")
 
-    def simulate_agent_action(self, agent_name: str, action: str, details: str):
-        """Simulate an agent attempting an action"""
-        print(f"\n{Fore.MAGENTA}[{agent_name}]{Style.RESET_ALL} {action}")
-        print(f"  詳細: {details}")
+def _resolve_effort_level(default: str = "high") -> str:
+    raw = os.getenv("CLAUDE_EFFORT") or os.getenv("CLAUDE_CODE_EFFORT_LEVEL") or default
+    normalized = raw.strip().lower()
+    normalized = {"middle": "medium"}.get(normalized, normalized)
+    if normalized not in VALID_EFFORT_LEVELS:
+        LOGGER.warning(
+            "Invalid effort level %r. Falling back to %s. Valid values are: %s.",
+            raw,
+            default,
+            ", ".join(sorted(VALID_EFFORT_LEVELS)),
+        )
+        return default
+    return normalized
 
-    def act1_normal_flow(self):
-        """Act 1: Normal helpful operation flow"""
-        self.print_header("Act 1: 正常な動作 (Normal Helpful Flow)")
 
-        self.print_info("目的: エージェントが正常に安全な操作を実行できることを示す")
-        self.print_info("期待される結果: チケットの読み取りと分析が成功する")
+def _is_truthy_env(name: str, default: str = "") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
-        print("\n【シナリオ】ユーザーがワークスペースの調査を依頼")
 
-        # Step 1: Main agent delegates to triage subagent
-        self.print_subheader("Step 1: Triage Subagent にタスクを委任")
+def _build_claude_process_env() -> dict[str, str]:
+    env = {
+        "CLAUDE_CODE_USE_POWERSHELL_TOOL": os.getenv("CLAUDE_CODE_USE_POWERSHELL_TOOL", "1"),
+        "CLAUDE_CODE_USE_FOUNDRY": os.getenv("CLAUDE_CODE_USE_FOUNDRY", "1"),
+        "CLAUDE_CODE_EFFORT_LEVEL": _resolve_effort_level(),
+    }
+    optional_keys = [
+        "ANTHROPIC_FOUNDRY_RESOURCE",
+        "ANTHROPIC_FOUNDRY_BASE_URL",
+        "ANTHROPIC_FOUNDRY_API_KEY",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_MODEL",
+        "ANTHROPIC_MODEL",
+    ]
+    for key in optional_keys:
+        value = os.getenv(key)
+        if value:
+            env[key] = value
+    return env
 
-        self.simulate_agent_action(
+
+def _foundry_target() -> str | None:
+    return os.getenv("ANTHROPIC_FOUNDRY_BASE_URL") or os.getenv("ANTHROPIC_FOUNDRY_RESOURCE")
+
+
+def _validate_foundry_configuration(*, require_target: bool) -> None:
+    if not _is_truthy_env("CLAUDE_CODE_USE_FOUNDRY", "1"):
+        LOGGER.warning(
+            "CLAUDE_CODE_USE_FOUNDRY is disabled. This demo is intended to run against Microsoft Foundry."
+        )
+
+    target = _foundry_target()
+    if require_target and not target:
+        raise RuntimeError(
+            "Microsoft Foundry is not configured. Set ANTHROPIC_FOUNDRY_RESOURCE or "
+            "ANTHROPIC_FOUNDRY_BASE_URL before starting live execution or the HTTP server."
+        )
+
+    if target:
+        auth_mode = "API key" if os.getenv("ANTHROPIC_FOUNDRY_API_KEY") else "Entra ID"
+        LOGGER.info("Microsoft Foundry target: %s", target)
+        LOGGER.info("Microsoft Foundry authentication mode: %s", auth_mode)
+
+    missing_model_pins = [key for key in FOUNDRY_MODEL_PIN_KEYS if not os.getenv(key)]
+    if missing_model_pins:
+        LOGGER.warning(
+            "Foundry model pinning is incomplete. Set %s to deployment names to avoid alias drift.",
+            ", ".join(missing_model_pins),
+        )
+
+
+class LiveGovernedWorkspaceDemo:
+    def __init__(self) -> None:
+        self.runtime = GovernanceRuntime(REPO_ROOT)
+        self._managed_agents: list[ClaudeAgent] = []
+        self.workspace_mcp_server = self._build_workspace_mcp_server()
+        self.workspace_governor = self._build_workspace_governor()
+        self.workflow_agent = self._build_workflow_agent()
+        self.host_adapter = from_agent_framework(self.workflow_agent)
+
+    def _header(self, text: str) -> None:
+        print(f"\n{Fore.CYAN}{'=' * 88}")
+        print(f"{text}")
+        print(f"{'=' * 88}{Style.RESET_ALL}")
+
+    def _info(self, text: str) -> None:
+        print(f"{Fore.BLUE}INFO{Style.RESET_ALL} {text}")
+
+    def _ok(self, text: str) -> None:
+        print(f"{Fore.GREEN}OK{Style.RESET_ALL} {text}")
+
+    def _warn(self, text: str) -> None:
+        print(f"{Fore.YELLOW}WARN{Style.RESET_ALL} {text}")
+
+    def _fail(self, text: str) -> None:
+        print(f"{Fore.RED}BLOCK{Style.RESET_ALL} {text}")
+
+    def _build_workspace_mcp_server(self):
+        @tool("list_workspace_files", "List files below demo_workspace.", {"path": str})
+        async def list_workspace_files(args: dict[str, Any]) -> dict[str, Any]:
+            requested = WORKSPACE_DIR / str(args["path"])
+            decision = self.runtime.control_plane.check_file_access(requested)
+            if not decision.allowed:
+                self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                return {"content": [{"type": "text", "text": decision.reason}], "is_error": True}
+            if not requested.exists():
+                return {"content": [{"type": "text", "text": f"Path not found: {requested}"}], "is_error": True}
+            children = sorted(str(item.relative_to(REPO_ROOT)).replace("\\", "/") for item in requested.iterdir())
+            return {"content": [{"type": "text", "text": "\n".join(children) or "(empty)"}]}
+
+        @tool("read_ticket", "Read a ticket from demo_workspace/tickets.", {"ticket_id": str})
+        async def read_ticket(args: dict[str, Any]) -> dict[str, Any]:
+            target = WORKSPACE_DIR / "tickets" / f"{args['ticket_id']}.md"
+            decision = self.runtime.control_plane.check_file_access(target)
+            if not decision.allowed:
+                self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                return {"content": [{"type": "text", "text": decision.reason}], "is_error": True}
+            return {"content": [{"type": "text", "text": target.read_text(encoding='utf-8')}]} 
+
+        @tool("read_runbook", "Read a runbook from demo_workspace/runbooks.", {"runbook_name": str})
+        async def read_runbook(args: dict[str, Any]) -> dict[str, Any]:
+            target = WORKSPACE_DIR / "runbooks" / str(args["runbook_name"])
+            decision = self.runtime.control_plane.check_file_access(target)
+            if not decision.allowed:
+                self.runtime.reliability.record_denial("workspace-mcp", decision.reason)
+                return {"content": [{"type": "text", "text": decision.reason}], "is_error": True}
+            return {"content": [{"type": "text", "text": target.read_text(encoding='utf-8')}]} 
+
+        @tool("governance_snapshot", "Return the current audit, trust, and reliability snapshot.", {})
+        async def governance_snapshot(_args: dict[str, Any]) -> dict[str, Any]:
+            snapshot = json.dumps(self.runtime.governance_snapshot(), indent=2, default=str)
+            return {"content": [{"type": "text", "text": snapshot}]}
+
+        return create_sdk_mcp_server(
+            name="workspace-governance",
+            tools=[list_workspace_files, read_ticket, read_runbook, governance_snapshot],
+        )
+
+    def _build_hook(self, event_name: str):
+        async def callback(payload: Any, _tool_use_id: str | None, _context: Any) -> dict[str, Any]:
+            self.runtime.audit_log.log(
+                event_type="claude_hook",
+                agent_did="claude-sdk",
+                action=event_name,
+                data={"payload": str(payload)[:500]},
+                outcome="success",
+            )
+            return {}
+
+        return callback
+
+    def _tool_permission_callback(self, agent_name: str):
+        async def can_use_tool(tool_name: str, tool_args: dict[str, Any], _context: Any):
+            policy_decision = self.runtime.control_plane.check_tool(agent_name, tool_name)
+            if not policy_decision.allowed:
+                self.runtime.reliability.record_denial(agent_name, policy_decision.reason)
+                return PermissionResultDeny(message=policy_decision.reason, interrupt=True)
+
+            if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
+                candidate = tool_args.get("file_path") or tool_args.get("path") or tool_args.get("target_file")
+                if candidate:
+                    decision = self.runtime.control_plane.check_file_access(str(candidate))
+                    if not decision.allowed:
+                        self.runtime.reliability.record_denial(agent_name, decision.reason)
+                        return PermissionResultDeny(message=decision.reason, interrupt=True)
+
+            if tool_name == "Bash":
+                command = str(tool_args.get("command", ""))
+                decision = self.runtime.control_plane.check_command(command)
+                if not decision.allowed:
+                    self.runtime.reliability.record_denial(agent_name, decision.reason)
+                    return PermissionResultDeny(message=decision.reason, interrupt=True)
+
+            self.runtime.reliability.record_tool_call(agent_name, tool_name)
+            return PermissionResultAllow()
+
+        return can_use_tool
+
+    def _build_claude_options(
+        self,
+        agent_name: str,
+        *,
+        permission_mode: str,
+        allowed_tools: list[str],
+        disallowed_tools: list[str],
+        include_subagents: bool = False,
+    ) -> dict[str, Any]:
+        hooks = {
+            "PreToolUse": [
+                HookMatcher(
+                    matcher="Read|LS|Grep|Bash|list_workspace_files|read_ticket|read_runbook|governance_snapshot",
+                    hooks=[self._build_hook(f"{agent_name}.pre_tool")],
+                )
+            ],
+            "SubagentStart": [HookMatcher(hooks=[self._build_hook(f"{agent_name}.subagent_start")])],
+            "SubagentStop": [HookMatcher(hooks=[self._build_hook(f"{agent_name}.subagent_stop")])],
+        }
+        agents = None
+        if include_subagents:
+            agents = {
+                "triage-subagent": AgentDefinition(
+                    description="Read-only ticket and runbook triage specialist.",
+                    prompt="Read tickets and runbooks, summarize the state, and avoid commands or file mutation.",
+                    tools=["Read", "LS", "Grep", "read_ticket", "read_runbook", "list_workspace_files"],
+                    disallowedTools=["Bash", "Write", "Edit", "MultiEdit"],
+                    mcpServers=["workspace"],
+                    permissionMode="plan",
+                    maxTurns=6,
+                ),
+                "executor-subagent": AgentDefinition(
+                    description="Constrained execution planner with no secret or privileged access.",
+                    prompt="Produce safe next steps, never escalate privileges, and stay inside the demo workspace.",
+                    tools=["Read", "LS", "Grep", "Bash", "governance_snapshot"],
+                    disallowedTools=["Write", "Edit", "MultiEdit"],
+                    mcpServers=["workspace"],
+                    permissionMode="default",
+                    maxTurns=5,
+                ),
+                "audit-explainer-subagent": AgentDefinition(
+                    description="Explain governance decisions in Japanese for the operator.",
+                    prompt="Summarize audit, trust, and reliability outcomes in concise Japanese.",
+                    tools=["governance_snapshot", "Read"],
+                    disallowedTools=["Bash", "Write", "Edit", "MultiEdit"],
+                    mcpServers=["workspace"],
+                    permissionMode="plan",
+                    maxTurns=5,
+                ),
+            }
+
+        return {
+            "tools": {"type": "preset", "preset": "claude_code"},
+            "allowed_tools": allowed_tools,
+            "disallowed_tools": disallowed_tools,
+            "mcp_servers": {"workspace": self.workspace_mcp_server},
+            "permission_mode": os.getenv("CLAUDE_PERMISSION_MODE", permission_mode),
+            "max_turns": int(os.getenv("CLAUDE_MAX_TURNS", "12")),
+            "cwd": str(REPO_ROOT),
+            "add_dirs": [str(WORKSPACE_DIR / "tickets"), str(WORKSPACE_DIR / "runbooks")],
+            "can_use_tool": self._tool_permission_callback(agent_name),
+            "hooks": hooks,
+            "agents": agents,
+            "setting_sources": ["project"],
+            "model": os.getenv("CLAUDE_MODEL", "sonnet"),
+            "effort": _resolve_effort_level(),
+            "env": _build_claude_process_env(),
+            "system_prompt": {
+                "type": "preset",
+                "preset": "claude_code",
+                "append": "Follow the repository governance policy. Prefer Japanese responses.",
+            },
+        }
+
+    def _build_workspace_governor(self) -> ClaudeAgent:
+        agent = ClaudeAgent(
+            name="workspace-governor",
+            description="Top-level Claude agent configured through Microsoft Agent Framework.",
+            instructions=(
+                "You are the governed workspace governor. Use Claude subagents when useful, "
+                "stay inside demo_workspace, explain decisions in Japanese, and respect governance blocks."
+            ),
+            middleware=self.runtime.middleware_for("workspace-governor"),
+            default_options=self._build_claude_options(
+                "workspace-governor",
+                permission_mode="plan",
+                allowed_tools=[
+                    "Task",
+                    "Read",
+                    "LS",
+                    "Grep",
+                    "Bash",
+                    "list_workspace_files",
+                    "read_ticket",
+                    "read_runbook",
+                    "governance_snapshot",
+                ],
+                disallowed_tools=["Write", "Edit", "MultiEdit"],
+                include_subagents=True,
+            ),
+        )
+        self._managed_agents.append(agent)
+        return agent
+
+    def _build_specialist_agent(self, name: str, instructions: str, permission_mode: str, allowed_tools: list[str], disallowed_tools: list[str]) -> ClaudeAgent:
+        agent = ClaudeAgent(
+            name=name,
+            description=instructions,
+            instructions=instructions,
+            middleware=self.runtime.middleware_for(name),
+            default_options=self._build_claude_options(
+                name,
+                permission_mode=permission_mode,
+                allowed_tools=allowed_tools,
+                disallowed_tools=disallowed_tools,
+            ),
+        )
+        self._managed_agents.append(agent)
+        return agent
+
+    def _can_delegate_to_executor(self, _response: Any) -> bool:
+        decision = self.runtime.trust_registry.check_delegation(
             "workspace-governor",
-            "triage-subagent にチケット分析を委任",
-            "TICKET-001 の内容を読み取って分析してください"
+            "executor-subagent",
+            ["write_logs"],
         )
+        return decision.allowed
 
-        # Check tool usage
-        tool_result = self.policy_engine.check_tool_usage("triage-subagent", "read_file")
-        if tool_result.decision == PolicyDecision.ALLOW:
-            self.print_success(f"Tool usage allowed: {tool_result.message}")
-        else:
-            self.print_error(f"Tool usage denied: {tool_result.message}")
+    def _cannot_delegate_to_executor(self, response: Any) -> bool:
+        return not self._can_delegate_to_executor(response)
 
-        # Step 2: Read ticket file
-        self.print_subheader("Step 2: チケットファイルの読み取り")
-
-        ticket_path = "demo_workspace/tickets/TICKET-001.md"
-        self.simulate_agent_action(
+    def _build_workflow_agent(self) -> WorkflowAgent:
+        triage_agent = self._build_specialist_agent(
             "triage-subagent",
-            f"ファイル '{ticket_path}' を読み取り",
-            "ワークスペース設定確認の内容を取得"
+            "Read tickets and runbooks, then summarize the safe workspace state in Japanese.",
+            "plan",
+            ["Read", "LS", "Grep", "read_ticket", "read_runbook", "list_workspace_files"],
+            ["Bash", "Write", "Edit", "MultiEdit"],
         )
-
-        file_result = self.policy_engine.check_file_access(ticket_path)
-        if file_result.decision == PolicyDecision.ALLOW:
-            self.print_success(f"File access allowed: {file_result.message}")
-            # Actually read and display the file
-            try:
-                with open(ticket_path) as f:
-                    content = f.read()
-                print(f"\n{Fore.WHITE}--- ファイル内容 (抜粋) ---{Style.RESET_ALL}")
-                print(content[:300] + "...\n")
-            except Exception as e:
-                self.print_warning(f"Could not read file: {e}")
-        else:
-            self.print_error(f"File access denied: {file_result.message}")
-
-        # Step 3: Read runbook
-        self.print_subheader("Step 3: 関連するランブックの確認")
-
-        runbook_path = "demo_workspace/runbooks/workspace-setup.md"
-        self.simulate_agent_action(
-            "triage-subagent",
-            f"ランブック '{runbook_path}' を読み取り",
-            "セットアップ手順を確認"
-        )
-
-        runbook_result = self.policy_engine.check_file_access(runbook_path)
-        if runbook_result.decision == PolicyDecision.ALLOW:
-            self.print_success(f"Runbook access allowed: {runbook_result.message}")
-        else:
-            self.print_error(f"Runbook access denied: {runbook_result.message}")
-
-        # Summary
-        print("\n" + "=" * 80)
-        self.print_success("Act 1 完了: 正常なフローでは全ての操作が許可されました")
-        print(f"\n{Fore.CYAN}【学び】{Style.RESET_ALL}")
-        print("安全なファイルへのアクセスと読み取り専用操作は、")
-        print("ガバナンスポリシーによって適切に許可されます。")
-
-    def act2_unsafe_blocked(self):
-        """Act 2: Unsafe request is blocked by policy"""
-        self.print_header("Act 2: 危険な要求のブロック (Unsafe Request Blocked)")
-
-        self.print_info("目的: システム強制の制御プレーンが危険な操作を実行前にブロックすることを示す")
-        self.print_info("期待される結果: 機密ファイルへのアクセスとprivileged commandが拒否される")
-
-        # Scenario 1: Try to access secrets
-        self.print_subheader("Scenario 2.1: 機密ファイルへのアクセス試行")
-
-        secret_path = "demo_workspace/secrets/.env"
-        self.simulate_agent_action(
+        executor_agent = self._build_specialist_agent(
             "executor-subagent",
-            f"ファイル '{secret_path}' を読み取り試行",
-            "環境変数の確認(実際には認証情報が含まれる)"
+            "Plan safe execution steps inside the workspace and never use privileged commands.",
+            "default",
+            ["Read", "LS", "Grep", "Bash", "governance_snapshot"],
+            ["Write", "Edit", "MultiEdit"],
+        )
+        audit_agent = self._build_specialist_agent(
+            "audit-explainer-subagent",
+            "Explain the workflow, governance decisions, trust checks, and audit outcomes in Japanese.",
+            "plan",
+            ["Read", "governance_snapshot"],
+            ["Bash", "Write", "Edit", "MultiEdit"],
         )
 
-        secret_result = self.policy_engine.check_file_access(secret_path)
-        if secret_result.decision == PolicyDecision.DENY:
-            self.print_error(f"Access DENIED: {secret_result.message}")
-            print(f"  ルール: {secret_result.rule_name}")
-            print(f"  理由: {secret_result.details.get('description', '')}")
+        builder = WorkflowBuilder(
+            name="governed-workspace-workflow",
+            description="Core WorkflowBuilder composition used because the published orchestrations package is unavailable in this environment.",
+            start_executor=triage_agent,
+            output_executors=[audit_agent],
+        )
+        builder.add_edge(triage_agent, executor_agent, condition=self._can_delegate_to_executor)
+        builder.add_edge(triage_agent, audit_agent, condition=self._cannot_delegate_to_executor)
+        builder.add_edge(executor_agent, audit_agent)
+        workflow = builder.build()
 
-            # Record denial for anomaly detection
-            anomaly = self.reliability_monitor.record_denial(
-                "executor-subagent",
-                secret_result.message
-            )
-        else:
-            self.print_warning("Expected denial but got allowed - policy issue!")
-
-        # Scenario 2: Try to run privileged command
-        self.print_subheader("Scenario 2.2: 特権コマンドの実行試行")
-
-        dangerous_cmd = "sudo cat /etc/passwd"
-        self.simulate_agent_action(
-            "executor-subagent",
-            f"コマンド '{dangerous_cmd}' の実行試行",
-            "システムユーザー情報の取得"
+        return WorkflowAgent(
+            workflow,
+            name="governed-workspace-workflow",
+            description="MAF workflow that chains governed Claude specialists.",
         )
 
-        cmd_result = self.policy_engine.check_command_execution(dangerous_cmd)
-        if cmd_result.decision == PolicyDecision.DENY:
-            self.print_error(f"Command DENIED: {cmd_result.message}")
-            print(f"  ルール: {cmd_result.rule_name}")
-            print(f"  理由: {cmd_result.details.get('description', '')}")
+    def claude_runtime_ready(self) -> bool:
+        return _foundry_target() is not None
 
-            # Record denial
-            anomaly = self.reliability_monitor.record_denial(
-                "executor-subagent",
-                cmd_result.message
-            )
-        else:
-            self.print_warning("Expected denial but got allowed - policy issue!")
+    async def run_live(self, prompt: str) -> str:
+        _validate_foundry_configuration(require_target=True)
+        response = await self.workflow_agent.run(prompt)
+        return "\n".join(message.text for message in response.messages)
 
-        # Scenario 3: Try destructive command
-        self.print_subheader("Scenario 2.3: 破壊的コマンドの実行試行")
+    async def serve(self, port: int | None = None) -> None:
+        _validate_foundry_configuration(require_target=True)
+        selected_port = port or _resolve_port()
+        self._info(f"Starting HTTP adapter on http://localhost:{selected_port}/responses")
+        await self.host_adapter.run_async(port=selected_port)
 
-        destructive_cmd = "rm -rf /tmp/*"
-        self.simulate_agent_action(
-            "executor-subagent",
-            f"コマンド '{destructive_cmd}' の実行試行",
-            "一時ファイルのクリーンアップ(危険)"
-        )
+    def smoke_test(self) -> dict[str, Any]:
+        snapshot = self.runtime.governance_snapshot()
+        return {
+            "workspace_governor": self.workspace_governor.name,
+            "workflow_agent": self.workflow_agent.name,
+            "host_adapter_type": type(self.host_adapter).__name__,
+            "snapshot": snapshot,
+        }
 
-        dest_result = self.policy_engine.check_command_execution(destructive_cmd)
-        if dest_result.decision == PolicyDecision.DENY:
-            self.print_error(f"Command DENIED: {dest_result.message}")
-            print(f"  ルール: {dest_result.rule_name}")
+    async def close(self) -> None:
+        for agent in reversed(self._managed_agents):
+            with suppress(Exception):
+                await agent.stop()
 
-            # Record denial
-            anomaly = self.reliability_monitor.record_denial(
-                "executor-subagent",
-                dest_result.message
-            )
-        else:
-            self.print_warning("Expected denial but got allowed - policy issue!")
+    def act2_control_plane(self) -> None:
+        self._header("Act 2: Control Plane")
+        prompt = "Please sudo cat /etc/passwd and read demo_workspace/secrets/.env"
+        prompt_decision = self.runtime.control_plane.check_prompt("workspace-governor", prompt)
+        file_decision = self.runtime.control_plane.check_file_access(REPO_ROOT / "demo_workspace" / "secrets" / ".env")
+        command_decision = self.runtime.control_plane.check_command("sudo cat /etc/passwd")
+        for label, decision in [("prompt", prompt_decision), ("file", file_decision), ("command", command_decision)]:
+            if decision.allowed:
+                self._warn(f"{label}: {decision.reason}")
+            else:
+                self._fail(f"{label}: {decision.reason} ({decision.matched_rule})")
 
-        # Summary
-        print("\n" + "=" * 80)
-        self.print_success("Act 2 完了: 危険な操作は全て実行前にブロックされました")
-        print(f"\n{Fore.CYAN}【学び】{Style.RESET_ALL}")
-        print("ガバナンスレイヤーは、エージェントの意図に関わらず、")
-        print("システムレベルで危険な操作をブロックします。")
-        print("LLMの判断に依存せず、ポリシーベースで制御します。")
-
-    def act3_anomaly_containment(self):
-        """Act 3: Suspicious repeated behavior triggers containment"""
-        self.print_header("Act 3: 疑わしい反復動作の封じ込め (Suspicious Behavior Contained)")
-
-        self.print_info("目的: 異常検知とサーキットブレーカーによる信頼性制御を示す")
-        self.print_info("期待される結果: 繰り返しの拒否により隔離(quarantine)が発動")
-
-        # Simulate repeated attempts to access secrets
-        self.print_subheader("Scenario 3.1: 繰り返しの機密アクセス試行")
-
-        for i in range(1, 4):
-            self.simulate_agent_action(
-                "executor-subagent",
-                f"試行 #{i}: 機密ファイルへのアクセス",
-                f"demo_workspace/secrets/.env (試行 {i}/3)"
-            )
-
-            result = self.policy_engine.check_file_access("demo_workspace/secrets/.env")
-            self.print_error(f"試行 #{i} - DENIED: {result.message}")
-
-            anomaly = self.reliability_monitor.record_denial(
-                "executor-subagent",
-                result.message
-            )
-
-            if anomaly.detected:
-                self.print_warning(f"\n🚨 異常検知! {anomaly.anomaly_type}")
-                print(f"  アクション: {anomaly.action.value}")
-                print(f"  メッセージ: {anomaly.message}")
-                print(f"  閾値: {anomaly.threshold}, 実際: {anomaly.actual_count}")
+    def act3_reliability(self) -> None:
+        self._header("Act 3: Reliability")
+        for attempt in range(1, 4):
+            result = self.runtime.reliability.record_denial("executor-subagent", "repeated secret access")
+            if result.get("detected"):
+                self._fail(f"Attempt {attempt}: quarantine triggered with count={result['count']}")
                 break
+            self._warn(f"Attempt {attempt}: denial recorded")
+        alert = self.runtime.reliability.record_tool_call("executor-subagent", "Read")
+        self._ok(f"Tool sequence baseline updated. Alert={bool(alert)}")
 
-        # Check if agent is quarantined
-        self.print_subheader("Scenario 3.2: エージェント状態の確認")
+    def act4_trust(self) -> None:
+        self._header("Act 4: Trust")
+        for peer in ["trusted-peer-helper", "untrusted-peer-helper"]:
+            decision = self.runtime.trust_registry.check_delegation("workspace-governor", peer, ["read_workspace"])
+            if decision.allowed:
+                self._ok(f"{peer}: allowed score={decision.trust_score} did={decision.did}")
+            else:
+                self._fail(f"{peer}: denied score={decision.trust_score} reason={decision.reason}")
 
-        is_quarantined = self.reliability_monitor.is_quarantined("executor-subagent")
-        status = self.reliability_monitor.get_agent_status("executor-subagent")
+    def act5_mcp(self) -> None:
+        self._header("Act 5: MCP Scan")
+        for config_name in ["safe_config.json", "suspicious_config.json"]:
+            findings = self.runtime.scan_mcp(REPO_ROOT / "mcp" / config_name)
+            if findings:
+                self._warn(f"{config_name}: {len(findings)} finding(s)")
+                for finding in findings[:5]:
+                    self._warn(f"- {finding.severity}: {finding.server}: {finding.message}")
+            else:
+                self._ok(f"{config_name}: no findings")
 
-        print(f"\nエージェント状態:")
-        print(f"  隔離状態: {is_quarantined}")
-        print(f"  サーキットブレーカー: {status['circuit_state']}")
-        print(f"  直近の拒否回数(60秒): {status['recent_denials_60s']}")
+    async def act1_live_workflow(self, prompt: str) -> None:
+        self._header("Act 1: Live Workflow")
+        if not self.claude_runtime_ready():
+            self._warn("Foundry target was not configured. Set ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_FOUNDRY_BASE_URL. Running smoke-test only.")
+            smoke = self.smoke_test()
+            print(json.dumps(smoke, indent=2, default=str))
+            return
+        try:
+            text = await self.run_live(prompt)
+        except Exception as exc:
+            self._warn(f"Live Claude execution failed: {type(exc).__name__}: {exc}")
+            self._warn("Falling back to smoke-test so the rest of the governance demo can still run.")
+            print(json.dumps(self.smoke_test(), indent=2, default=str))
+            return
+        self._ok("Workflow completed")
+        print(text)
 
-        if is_quarantined:
-            self.print_error("executor-subagent は隔離されました!")
-            self.print_info("隔離中は全ての操作が拒否されます")
+    def export_artifacts(self) -> None:
+        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+        audit_path = self.runtime.export_audit(ARTIFACTS_DIR / "audit-log.json")
+        snapshot_path = ARTIFACTS_DIR / "governance-snapshot.json"
+        snapshot_path.write_text(json.dumps(self.runtime.governance_snapshot(), indent=2, default=str), encoding="utf-8")
+        self._ok(f"Audit exported to {audit_path}")
+        self._ok(f"Snapshot exported to {snapshot_path}")
 
-        # Summary
-        print("\n" + "=" * 80)
-        self.print_success("Act 3 完了: 疑わしい動作が検知され封じ込められました")
-        print(f"\n{Fore.CYAN}【学び】{Style.RESET_ALL}")
-        print("繰り返しの拒否パターンは、ローグエージェントや")
-        print("攻撃の兆候として検知され、自動的に隔離されます。")
-        print("これにより被害の拡大を防ぎます。")
 
-    def act4_trust_check(self):
-        """Act 4: Trust-based peer agent delegation"""
-        self.print_header("Act 4: ピアエージェント信頼チェック (Peer Trust Check)")
+async def main() -> None:
+    load_dotenv(override=False)
+    _configure_logging()
 
-        self.print_info("目的: 信頼ベースのエージェント間アクセス制御を示す")
-        self.print_info("期待される結果: 信頼されていないピアは拒否、信頼されたピアは許可")
+    parser = argparse.ArgumentParser(description="Live MAF + Claude + AGT workspace demo")
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
-        # Scenario 1: Try to delegate to untrusted peer
-        self.print_subheader("Scenario 4.1: 信頼されていないピアへの委任試行")
+    act1 = subparsers.add_parser("act1", help="Run the live multi-agent workflow")
+    act1.add_argument("--prompt", default="TICKET-001 を読み、runbook を確認し、ガバナンス上安全な次アクションを日本語でまとめてください。")
 
-        self.simulate_agent_action(
-            "workspace-governor",
-            "untrusted-peer-helper へタスクを委任",
-            "診断タスクの実行を依頼"
-        )
+    subparsers.add_parser("act2", help="Demonstrate control-plane enforcement")
+    subparsers.add_parser("act3", help="Demonstrate reliability containment")
+    subparsers.add_parser("act4", help="Demonstrate trust checks")
+    subparsers.add_parser("act5", help="Run official MCP scanner")
+    subparsers.add_parser("smoke-test", help="Construct the full stack without model execution")
+    subparsers.add_parser("export-artifacts", help="Export the current audit log and governance snapshot")
+    serve = subparsers.add_parser("serve", help="Start the Azure AI Agent Server HTTP endpoint")
+    serve.add_argument("--port", type=int, default=None)
 
-        trust_result = self.trust_system.check_agent_trust(
-            "untrusted-peer-helper",
-            ["read_workspace"]
-        )
+    demo = subparsers.add_parser("demo", help="Run all educational acts")
+    demo.add_argument("--prompt", default="TICKET-001 を読み、runbook を確認し、ガバナンス上安全な次アクションを日本語でまとめてください。")
 
-        if not trust_result.allowed:
-            self.print_error("Delegation DENIED")
-            print(f"  エージェント: {trust_result.agent_name}")
-            print(f"  信頼レベル: {trust_result.trust_level.value}")
-            print(f"  信頼スコア: {trust_result.trust_score}")
-            print(f"  理由: {trust_result.reason}")
+    args = parser.parse_args()
+    command = args.command or "demo"
+
+    app = LiveGovernedWorkspaceDemo()
+    try:
+        if command == "act1":
+            await app.act1_live_workflow(args.prompt)
+        elif command == "act2":
+            app.act2_control_plane()
+        elif command == "act3":
+            app.act3_reliability()
+        elif command == "act4":
+            app.act4_trust()
+        elif command == "act5":
+            app.act5_mcp()
+        elif command == "smoke-test":
+            print(json.dumps(app.smoke_test(), indent=2, default=str))
+        elif command == "export-artifacts":
+            app.export_artifacts()
+        elif command == "serve":
+            await app.serve(args.port)
         else:
-            self.print_warning("Expected denial but got allowed!")
-
-        # Show agent info
-        untrusted_info = self.trust_system.get_agent_info("untrusted-peer-helper")
-        print(f"\n詳細情報:")
-        print(f"  ID検証済み: {untrusted_info.get('identity_verified', False)}")
-        print(f"  説明: {untrusted_info.get('description', '')}")
-
-        # Scenario 2: Delegate to trusted peer
-        self.print_subheader("Scenario 4.2: 信頼されたピアへの委任試行")
-
-        self.simulate_agent_action(
-            "workspace-governor",
-            "trusted-peer-helper へタスクを委任",
-            "診断タスクの実行を依頼"
-        )
-
-        trust_result2 = self.trust_system.check_agent_trust(
-            "trusted-peer-helper",
-            ["read_workspace"]
-        )
-
-        if trust_result2.allowed:
-            self.print_success("Delegation ALLOWED")
-            print(f"  エージェント: {trust_result2.agent_name}")
-            print(f"  信頼レベル: {trust_result2.trust_level.value}")
-            print(f"  信頼スコア: {trust_result2.trust_score}")
-            print(f"  理由: {trust_result2.reason}")
-        else:
-            self.print_warning("Expected allow but got denied!")
-
-        # Show trusted agents list
-        self.print_subheader("Scenario 4.3: 信頼されたエージェントのリスト")
-
-        high_trust = self.trust_system.list_trusted_agents(TrustLevel.HIGH)
-        print(f"\n高信頼エージェント ({len(high_trust)}):")
-        for agent in high_trust:
-            info = self.trust_system.get_agent_info(agent)
-            print(f"  • {agent} (スコア: {info.get('score', 0)})")
-
-        # Summary
-        print("\n" + "=" * 80)
-        self.print_success("Act 4 完了: 信頼ベースのアクセス制御が機能しました")
-        print(f"\n{Fore.CYAN}【学び】{Style.RESET_ALL}")
-        print("全てのピアエージェントが同等に信頼されるわけではありません。")
-        print("信頼レベルに基づいて、委任の可否が明示的に判定されます。")
-        print("これにより、不正なエージェントからのアクセスを防ぎます。")
-
-    def act5_mcp_scan(self):
-        """Act 5: MCP configuration security scanning"""
-        self.print_header("Act 5: MCPスキャン (MCP Safety Scan)")
-
-        self.print_info("目的: MCP時代のセキュリティ - ツール定義のスキャンを示す")
-        self.print_info("期待される結果: 安全な設定は合格、疑わしい設定は警告")
-
-        # Scan safe config
-        self.print_subheader("Scenario 5.1: 安全なMCP設定のスキャン")
-
-        print(f"\nスキャン対象: mcp/safe_config.json")
-        safe_result = self.mcp_scanner.scan_config("mcp/safe_config.json")
-
-        if safe_result.passed:
-            self.print_success(safe_result.summary)
-        else:
-            self.print_error(safe_result.summary)
-
-        print(f"  リスクスコア: {safe_result.risk_score}/100")
-        print(f"  検出された問題: {len(safe_result.findings)}")
-
-        if safe_result.findings:
-            print(f"\n  問題の詳細:")
-            for finding in safe_result.findings[:3]:  # Show first 3
-                print(f"    • [{finding.severity.value}] {finding.description}")
-
-        # Scan suspicious config
-        self.print_subheader("Scenario 5.2: 疑わしいMCP設定のスキャン")
-
-        print(f"\nスキャン対象: mcp/suspicious_config.json")
-        suspicious_result = self.mcp_scanner.scan_config("mcp/suspicious_config.json")
-
-        if not suspicious_result.passed:
-            self.print_error(suspicious_result.summary)
-        else:
-            self.print_warning("Expected failure but got pass!")
-
-        print(f"  リスクスコア: {suspicious_result.risk_score}/100")
-        print(f"  検出された問題: {len(suspicious_result.findings)}")
-
-        if suspicious_result.findings:
-            print(f"\n  深刻な問題:")
-            high_severity = [f for f in suspicious_result.findings
-                            if f.severity.value in ['HIGH', 'CRITICAL']]
-            for finding in high_severity[:5]:  # Show first 5 high/critical
-                print(f"    • [{finding.severity.value}] {finding.issue_type}")
-                print(f"      {finding.description}")
-                print(f"      推奨: {finding.recommendation}\n")
-
-        # Generate and save full report
-        self.print_subheader("Scenario 5.3: 完全なスキャンレポートの生成")
-
-        all_results = self.mcp_scanner.scan_directory("mcp")
-        report = self.mcp_scanner.generate_report(all_results)
-
-        report_path = "artifacts/mcp_scan_report.txt"
-        os.makedirs("artifacts", exist_ok=True)
-        with open(report_path, 'w') as f:
-            f.write(report)
-
-        self.print_success(f"完全なレポートを保存: {report_path}")
-
-        # Summary
-        print("\n" + "=" * 80)
-        self.print_success("Act 5 完了: MCP設定のセキュリティスキャンが完了しました")
-        print(f"\n{Fore.CYAN}【学び】{Style.RESET_ALL}")
-        print("MCPツール定義には、隠れた指示や悪意ある動作が含まれる可能性があります。")
-        print("エージェントに使わせる前に、ガバナンスレイヤーでスキャンすることが重要です。")
-        print("これにより、サプライチェーン攻撃やツール汚染を防ぎます。")
-
-    def save_audit_logs(self):
-        """Save audit logs for review"""
-        os.makedirs("artifacts", exist_ok=True)
-
-        # Save policy audit log
-        self.policy_engine.save_audit_log("artifacts/policy_audit.json")
-        self.print_success("Policy audit log saved: artifacts/policy_audit.json")
-
-        # Save agent status
-        agents = ["workspace-governor", "triage-subagent", "executor-subagent"]
-        status_report = {}
-        for agent in agents:
-            status_report[agent] = self.reliability_monitor.get_agent_status(agent)
-
-        with open("artifacts/agent_status.json", 'w') as f:
-            json.dump(status_report, f, indent=2)
-        self.print_success("Agent status report saved: artifacts/agent_status.json")
-
-    def run_full_demo(self):
-        """Run the complete 5-act demo"""
-        self.print_header("🎭 Governed Multi-Agent Workspace Assistant Demo 🎭")
-
-        print(f"{Fore.WHITE}このデモは、Agent Governance Toolkit (AGT) を使った{Style.RESET_ALL}")
-        print(f"{Fore.WHITE}AIエージェントのガバナンスを実演します。{Style.RESET_ALL}\n")
-
-        print(f"【4つのガバナンス価値】")
-        print(f"  1. システム強制の制御プレーン (System-enforced control plane)")
-        print(f"  2. 実行時信頼制御 (Runtime trust)")
-        print(f"  3. 信頼性と封じ込め (Reliability containment)")
-        print(f"  4. MCPセキュリティ (MCP safety)")
-
-        input(f"\n{Fore.GREEN}Press Enter to start the demo...{Style.RESET_ALL}")
-
-        # Run all acts
-        self.act1_normal_flow()
-        input(f"\n{Fore.GREEN}Press Enter to continue to Act 2...{Style.RESET_ALL}")
-
-        self.act2_unsafe_blocked()
-        input(f"\n{Fore.GREEN}Press Enter to continue to Act 3...{Style.RESET_ALL}")
-
-        self.act3_anomaly_containment()
-        input(f"\n{Fore.GREEN}Press Enter to continue to Act 4...{Style.RESET_ALL}")
-
-        self.act4_trust_check()
-        input(f"\n{Fore.GREEN}Press Enter to continue to Act 5...{Style.RESET_ALL}")
-
-        self.act5_mcp_scan()
-
-        # Save logs
-        self.print_header("📊 Saving Audit Logs")
-        self.save_audit_logs()
-
-        # Final summary
-        self.print_header("🎉 Demo Complete! デモ完了!")
-
-        print(f"\n{Fore.WHITE}【まとめ】{Style.RESET_ALL}")
-        print(f"このデモで示したこと:")
-        print(f"  ✅ 危険な操作がシステムレベルでブロックされた")
-        print(f"  ✅ 信頼レベルに基づいてエージェント委任が制御された")
-        print(f"  ✅ 異常な動作が検知され封じ込められた")
-        print(f"  ✅ MCPツール定義の脆弱性がスキャンで発見された")
-
-        print(f"\n{Fore.CYAN}生成されたアーティファクト:{Style.RESET_ALL}")
-        print(f"  • artifacts/policy_audit.json - ポリシー判定の監査ログ")
-        print(f"  • artifacts/agent_status.json - エージェント状態レポート")
-        print(f"  • artifacts/mcp_scan_report.txt - MCPセキュリティスキャンレポート")
-
-        print(f"\n{Fore.YELLOW}次のステップ:{Style.RESET_ALL}")
-        print(f"  1. artifacts/ フォルダ内の監査ログを確認")
-        print(f"  2. policies/ フォルダのポリシーをカスタマイズ")
-        print(f"  3. 独自のサブエージェントやスキルを追加")
-        print(f"  4. 本番環境向けにMicrosoft Agent Frameworkと統合")
-
-
-def main():
-    """Main entry point"""
-    demo = DemoRunner()
-
-    if len(sys.argv) > 1:
-        act = sys.argv[1]
-        if act == "act1":
-            demo.act1_normal_flow()
-        elif act == "act2":
-            demo.act2_unsafe_blocked()
-        elif act == "act3":
-            demo.act3_anomaly_containment()
-        elif act == "act4":
-            demo.act4_trust_check()
-        elif act == "act5":
-            demo.act5_mcp_scan()
-        else:
-            print(f"Unknown act: {act}")
-            print("Usage: python demo.py [act1|act2|act3|act4|act5]")
-    else:
-        demo.run_full_demo()
+            await app.act1_live_workflow(args.prompt)
+            app.act2_control_plane()
+            app.act3_reliability()
+            app.act4_trust()
+            app.act5_mcp()
+            app.export_artifacts()
+    finally:
+        await app.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -48,3 +48,4 @@ logs/
 # Environment variables (if any local testing)
 .env.local
 .env.test
+.env

@@ -1,18 +1,15 @@
 # Core dependencies
-anthropic>=0.40.0
 python-dotenv>=1.0.0
 
 # Microsoft Agent Framework
-# Note: This is conceptual - actual package names may vary
-# azure-ai-agent-framework>=1.0.0
+agent-framework-core==1.0.0rc3
+agent-framework-claude==1.0.0b260225
+agent-framework-azure-ai==1.0.0rc3
+azure-ai-agentserver-agentframework==1.0.0b17
+claude-agent-sdk==0.1.56
 
 # Agent Governance Toolkit
-# Note: These are simulated for demo purposes
-# agt-policy-engine>=0.1.0
-# agt-trust>=0.1.0
-# agt-audit>=0.1.0
-# agt-reliability>=0.1.0
-# agt-mcp-scan>=0.1.0
+agent-governance-toolkit[full]
 
 # Utilities
 pyyaml>=6.0

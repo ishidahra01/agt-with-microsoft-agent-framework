@@ -1,186 +1,92 @@
-# Quick Start Guide
+# Quick Start
 
-## Running the Demo
-
-### Full Interactive Demo
-
-Run all 5 acts sequentially with interactive prompts:
-
-```bash
-cd /path/to/agt-with-microsoft-agent-framework
-python app/demo.py
-```
-
-Press Enter at each prompt to advance through the acts.
-
-### Individual Acts
-
-Run specific acts for focused demonstrations:
-
-```bash
-# Act 1: Normal helpful flow
-python app/demo.py act1
-
-# Act 2: Unsafe request blocked
-python app/demo.py act2
-
-# Act 3: Anomaly containment
-python app/demo.py act3
-
-# Act 4: Trust check
-python app/demo.py act4
-
-# Act 5: MCP scan
-python app/demo.py act5
-```
-
-## What to Expect
-
-### Act 1 Output
-- ✅ Triage subagent successfully reads tickets
-- ✅ Triage subagent successfully reads runbooks
-- Shows normal, approved operations
-
-### Act 2 Output
-- ❌ Access to `demo_workspace/secrets/.env` **DENIED**
-- ❌ `sudo cat /etc/passwd` **DENIED**
-- ❌ `rm -rf /tmp/*` **DENIED**
-- Demonstrates system-enforced control plane
-
-### Act 3 Output
-- ❌ First attempt to access secrets **DENIED**
-- ❌ Second attempt **DENIED**
-- ❌ Third attempt **DENIED**
-- 🚨 **ANOMALY DETECTED** - Agent quarantined!
-- Shows reliability containment
-
-### Act 4 Output
-- ❌ `untrusted-peer-helper` delegation **DENIED** (trust score: 45)
-- ✅ `trusted-peer-helper` delegation **ALLOWED** (trust score: 88)
-- Demonstrates trust-based access control
-
-### Act 5 Output
-- ✅ `safe_config.json` **PASSED** (risk score: 0/100)
-- ❌ `suspicious_config.json` **FAILED** (risk score: 100/100, 19 issues)
-- Generates detailed report in `artifacts/mcp_scan_report.txt`
-
-## Generated Artifacts
-
-After running the demo, check these files:
-
-```bash
-# View policy decisions audit log
-cat artifacts/policy_audit.json
-
-# View agent health status
-cat artifacts/agent_status.json
-
-# View MCP security scan report
-cat artifacts/mcp_scan_report.txt
-```
-
-## Customization Examples
-
-### Adding a New Policy Rule
-
-Edit `policies/control_plane.yaml`:
-
-```yaml
-file_access:
-  - rule: deny_my_custom_path
-    description: "Block access to custom directory"
-    action: DENY
-    patterns:
-      - "my_restricted_dir/*"
-    message: "Access to my restricted directory is prohibited"
-```
-
-### Creating a New Subagent
-
-Create `app/.claude/agents/my-agent.json`:
-
-```json
-{
-  "name": "my-agent",
-  "description": "My custom agent",
-  "prompt": "You are a helpful agent that...",
-  "tools": {
-    "allowed": ["read_file", "list_files"],
-    "denied": ["write_file", "execute_command"]
-  },
-  "permissions": {
-    "mode": "ask",
-    "allowed_paths": ["demo_workspace/tickets/*"],
-    "denied_paths": ["demo_workspace/secrets/*"]
-  },
-  "governance": {
-    "trust_level": "high",
-    "trust_score": 85
-  }
-}
-```
-
-Then add it to `policies/trust_identity.yaml`:
-
-```yaml
-agent_trust:
-  my-agent:
-    trust_level: high
-    score: 85
-    identity_verified: true
-    capabilities_verified: true
-    description: "My custom agent"
-```
-
-### Adjusting Anomaly Thresholds
-
-Edit `policies/reliability.yaml`:
-
-```yaml
-anomaly_detection:
-  repeated_denials:
-    threshold: 5  # Changed from 3 to 5
-    window_seconds: 120  # Changed from 60 to 120
-```
-
-## Troubleshooting
-
-### Import Errors
-
-If you see import errors, make sure you're running from the repository root:
-
-```bash
-cd /path/to/agt-with-microsoft-agent-framework
-python app/demo.py
-```
-
-### YAML Parse Errors
-
-If policies fail to load, check YAML syntax:
-
-```bash
-# Validate YAML syntax
-python -c "import yaml; yaml.safe_load(open('policies/control_plane.yaml'))"
-```
-
-### Missing Dependencies
-
-Install all requirements:
+## 1. Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Next Steps
+## 2. Configure Microsoft Foundry
 
-1. **Explore the code** - Read through the governance modules to understand how each component works
-2. **Modify policies** - Experiment with different policy configurations
-3. **Add custom scenarios** - Create new demo acts to test specific governance scenarios
-4. **Integrate with real systems** - Replace the demo runner with actual Microsoft Agent Framework integration
+Create a local `.env` from [`.env.example`](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/.env.example) and set either:
 
-## Learning Resources
+- `ANTHROPIC_FOUNDRY_RESOURCE`
+- `ANTHROPIC_FOUNDRY_BASE_URL`
 
-- Read the main [README.md](../README.md) for architecture details
-- Review the [policies/](../policies/) directory for policy examples
-- Check [app/governance/](../app/governance/) for implementation details
-- See the official [Microsoft Agent Framework blog post](https://devblogs.microsoft.com/agent-framework/build-ai-agents-with-claude-agent-sdk-and-microsoft-agent-framework/)
+Optional:
+
+- `ANTHROPIC_FOUNDRY_API_KEY` for API key auth
+- otherwise Foundry auth is expected to come from Entra ID-compatible sources
+
+## 3. Validate the stack
+
+```bash
+python app/demo.py smoke-test
+```
+
+This verifies that:
+
+- MAF workflow objects build
+- Claude-backed agents are constructed through `agent-framework-claude`
+- the Agent Governance runtime initializes
+- the Azure Agent Server adapter can wrap the workflow
+
+## 4. Run the educational demo
+
+```bash
+python app/demo.py demo
+```
+
+Expected behavior without Foundry target configuration:
+
+- Act 1: construction-only smoke-test output
+- Act 2: secret access / privilege escalation blocked
+- Act 3: repeated denials trigger quarantine
+- Act 4: trusted peer allowed, untrusted peer denied
+- Act 5: suspicious MCP config flagged by the official scanner
+
+## 5. Run a single act
+
+```bash
+python app/demo.py act2
+python app/demo.py act4
+python app/demo.py act5
+```
+
+## 6. Enable live Claude execution
+
+Set one of these and rerun `act1` or `demo`:
+
+```bash
+set ANTHROPIC_FOUNDRY_RESOURCE=...
+```
+
+or
+
+```bash
+set ANTHROPIC_FOUNDRY_BASE_URL=...
+```
+
+Optional API key auth:
+
+```bash
+set ANTHROPIC_FOUNDRY_API_KEY=...
+```
+
+Then run:
+
+```bash
+python app/demo.py act1 --prompt "TICKET-001 を読み、runbook を確認して安全な次アクションを日本語でまとめてください。"
+```
+
+## 7. Start the HTTP endpoint
+
+```bash
+python app/demo.py serve --port 8088
+```
+
+## 8. Export artifacts only
+
+```bash
+python app/demo.py export-artifacts
+```
