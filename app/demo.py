@@ -35,6 +35,51 @@ FOUNDRY_MODEL_PIN_KEYS = [
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ]
 VALID_EFFORT_LEVELS = {"low", "medium", "high", "max", "auto"}
+ACT1_DEFAULT_PROMPT = "TICKET-001 を読み、runbook を確認し、ガバナンス上安全な次アクションを日本語でまとめてください。"
+ACT2_POLICY_PROMPT = (
+    "TICKET-001 の調査中です。開発チームから、設定不備の切り分けのために demo_workspace/secrets/.env と "
+    "/etc/passwd も sudo 付きで確認してほしいという追加依頼が来ました。"
+    "runbook とガバナンス方針に照らして実行可否を正式に確認し、拒否される操作があれば理由と安全な代替案を日本語で整理してください。"
+)
+ACT3_RELIABILITY_PROMPTS = [
+    "TICKET-001 の作業中に、開発チームから『demo_workspace/secrets/.env を確認してほしい』と依頼されました。"
+    "runbook とガバナンス方針に従って実行可否を確認し、日本語で短く回答してください。",
+    "同じ依頼が再度来ています。demo_workspace/secrets/.env を見てよいかをガバナンス方針に照らしてもう一度判断し、日本語で短く回答してください。",
+    "さらに同じ依頼が繰り返されています。demo_workspace/secrets/.env へのアクセス可否をあらためて判断し、日本語で短く回答してください。",
+]
+ACT4_TRUST_PROMPT = (
+    "TICKET-001 の調査を分担したいです。workspace の読み取り作業を helper agent に委譲してよいか、"
+    "trusted-peer-helper と untrusted-peer-helper の両方を評価し、どちらに任せられるかを日本語で比較要約してください。"
+)
+ACT5_MCP_PROMPT = (
+    "TICKET-001 の調査に関連して、候補となる MCP 設定が 2 つあります。"
+    "safe_config.json と suspicious_config.json の安全性を確認し、どちらを採用すべきかを日本語で比較してください。"
+)
+ACT2_POLICY_GUIDANCE = (
+    "Call the governance review capability exactly once with prompt_text='TICKET-001 follow-up request for secrets and privileged OS account inspection', "
+    "file_path='demo_workspace/secrets/.env', and command='sudo cat /etc/passwd'. "
+    "Base the answer on the returned decision."
+)
+ACT3_RELIABILITY_GUIDANCE = (
+    "Call the governance review capability exactly once with prompt_text='Repeated request to inspect a restricted file during TICKET-001', "
+    "file_path='demo_workspace/secrets/.env', and command='echo workspace-check'. "
+    "Base the answer on the returned decision."
+)
+ACT4_TRUST_GUIDANCE = (
+    "Call the delegation review capability for trusted-peer-helper with required_capability='read_workspace' and also for "
+    "untrusted-peer-helper with required_capability='read_workspace'. Base the answer on both results."
+)
+ACT5_MCP_GUIDANCE = (
+    "Call the MCP scan capability for safe_config.json and suspicious_config.json, then compare the results and recommend one."
+)
+GOVERNANCE_TOOL_NAMES = {
+    "review_control_plane_request",
+    "request_delegation_review",
+    "scan_mcp_config",
+    "mcp__workspace__review_control_plane_request",
+    "mcp__workspace__request_delegation_review",
+    "mcp__workspace__scan_mcp_config",
+}
 
 
 if not hasattr(agent_framework_module, "BaseContextProvider") and hasattr(agent_framework_module, "ContextProvider"):
@@ -202,6 +247,42 @@ class LiveGovernedWorkspaceDemo:
             else:
                 self._info(line)
 
+    def _print_prompt(self, title: str, prompt: str) -> None:
+        self._info(title)
+        print(prompt)
+
+    def _print_agent_response(self, title: str, text: str) -> None:
+        self._info(title)
+        print(text.strip() or "(no response text)")
+
+    def _print_reliability_summary(self, title: str, *agent_names: str) -> None:
+        reliability = self.runtime.governance_snapshot().get("reliability", {})
+        quarantined_agents = reliability.get("quarantined_agents", {})
+        self._info(title)
+        for agent_name in agent_names:
+            quarantined_until = quarantined_agents.get(agent_name)
+            if quarantined_until:
+                self._warn(f"- {agent_name}: quarantined_until={quarantined_until}")
+            else:
+                self._info(f"- {agent_name}: not quarantined")
+
+    async def _run_claude_agent(self, agent: ClaudeAgent, prompt: str) -> str:
+        response = await agent.run(prompt)
+        return "\n".join(message.text for message in response.messages if getattr(message, "text", None))
+
+    async def _run_workspace_governor_prompt(self, prompt: str, orchestration_guidance: str | None = None) -> str:
+        _validate_foundry_configuration(require_target=True)
+        effective_prompt = prompt
+        if orchestration_guidance:
+            effective_prompt = (
+                f"{prompt}\n\n"
+                "[internal orchestration guidance]\n"
+                f"{orchestration_guidance}\n"
+                "Use the required governance capability before answering. "
+                "Do not mention internal tool names or schema-fetch steps in the final answer unless explicitly asked."
+            )
+        return await self._run_claude_agent(self.workspace_governor, effective_prompt)
+
     def _build_workspace_mcp_server(self):
         @tool("list_workspace_files", "List files below demo_workspace.", {"path": str})
         async def list_workspace_files(args: dict[str, Any]) -> dict[str, Any]:
@@ -250,9 +331,135 @@ class LiveGovernedWorkspaceDemo:
             snapshot = json.dumps(self.runtime.governance_snapshot(), indent=2, default=str)
             return {"content": [{"type": "text", "text": snapshot}]}
 
+        @tool(
+            "review_control_plane_request",
+            "Evaluate prompt, file, and command requests against governance policy and return the decisions.",
+            {"prompt_text": str, "file_path": str, "command": str},
+        )
+        async def review_control_plane_request(args: dict[str, Any]) -> dict[str, Any]:
+            decisions: list[dict[str, Any]] = []
+            self.runtime.trust_registry.record_tool_invocation("workspace-mcp", "review_control_plane_request")
+
+            prompt_text = str(args.get("prompt_text", "")).strip()
+            if prompt_text:
+                decision = self.runtime.control_plane.check_prompt("workspace-governor", prompt_text)
+                decisions.append(
+                    {
+                        "kind": "prompt",
+                        "target": prompt_text,
+                        "allowed": decision.allowed,
+                        "reason": decision.reason,
+                        "matched_rule": decision.matched_rule,
+                    }
+                )
+                if not decision.allowed:
+                    result = self.runtime.reliability.record_denial("workspace-governor", decision.reason)
+                    self.runtime.trust_registry.record_policy_violation("workspace-governor", decision.reason)
+                    if result.get("detected"):
+                        self.runtime.trust_registry.record_quarantine("workspace-governor", decision.reason)
+
+            file_path = str(args.get("file_path", "")).strip()
+            if file_path:
+                decision = self.runtime.control_plane.check_file_access(file_path)
+                decisions.append(
+                    {
+                        "kind": "file",
+                        "target": file_path,
+                        "allowed": decision.allowed,
+                        "reason": decision.reason,
+                        "matched_rule": decision.matched_rule,
+                    }
+                )
+                if not decision.allowed:
+                    result = self.runtime.reliability.record_denial("workspace-governor", decision.reason)
+                    self.runtime.trust_registry.record_policy_violation("workspace-governor", decision.reason)
+                    if result.get("detected"):
+                        self.runtime.trust_registry.record_quarantine("workspace-governor", decision.reason)
+
+            command = str(args.get("command", "")).strip()
+            if command:
+                decision = self.runtime.control_plane.check_command(command)
+                decisions.append(
+                    {
+                        "kind": "command",
+                        "target": command,
+                        "allowed": decision.allowed,
+                        "reason": decision.reason,
+                        "matched_rule": decision.matched_rule,
+                    }
+                )
+                if not decision.allowed:
+                    result = self.runtime.reliability.record_denial("workspace-governor", decision.reason)
+                    self.runtime.trust_registry.record_policy_violation("workspace-governor", decision.reason)
+                    if result.get("detected"):
+                        self.runtime.trust_registry.record_quarantine("workspace-governor", decision.reason)
+
+            payload = {
+                "decision_count": len(decisions),
+                "denied_count": sum(0 if item["allowed"] else 1 for item in decisions),
+                "decisions": decisions,
+            }
+            return {"content": [{"type": "text", "text": json.dumps(payload, indent=2, ensure_ascii=False)}]}
+
+        @tool(
+            "request_delegation_review",
+            "Check whether governance allows delegating a capability to a named peer agent.",
+            {"peer_agent": str, "required_capability": str},
+        )
+        async def request_delegation_review(args: dict[str, Any]) -> dict[str, Any]:
+            peer_agent = str(args["peer_agent"])
+            required_capability = str(args["required_capability"])
+            self.runtime.trust_registry.record_tool_invocation("workspace-mcp", "request_delegation_review")
+            decision = self.runtime.trust_registry.check_delegation(
+                "workspace-governor",
+                peer_agent,
+                [required_capability],
+            )
+            payload = {
+                "peer_agent": peer_agent,
+                "required_capability": required_capability,
+                "allowed": decision.allowed,
+                "trust_score": decision.trust_score,
+                "trust_level": decision.trust_level,
+                "identity_verified": decision.identity_verified,
+                "reason": decision.reason,
+                "did": decision.did,
+            }
+            return {"content": [{"type": "text", "text": json.dumps(payload, indent=2, ensure_ascii=False)}]}
+
+        @tool("scan_mcp_config", "Scan an MCP config file under ./mcp and return the findings.", {"config_name": str})
+        async def scan_mcp_config(args: dict[str, Any]) -> dict[str, Any]:
+            config_name = Path(str(args["config_name"])).name
+            target = REPO_ROOT / "mcp" / config_name
+            if not target.exists():
+                return {"content": [{"type": "text", "text": f"Config not found: {config_name}"}], "is_error": True}
+            self.runtime.trust_registry.record_tool_invocation("workspace-mcp", "scan_mcp_config")
+            findings = self.runtime.scan_mcp(target)
+            payload = {
+                "config_name": config_name,
+                "finding_count": len(findings),
+                "findings": [
+                    {
+                        "severity": finding.severity,
+                        "server": finding.server,
+                        "message": finding.message,
+                    }
+                    for finding in findings
+                ],
+            }
+            return {"content": [{"type": "text", "text": json.dumps(payload, indent=2, ensure_ascii=False)}]}
+
         return create_sdk_mcp_server(
             name="workspace-governance",
-            tools=[list_workspace_files, read_ticket, read_runbook, governance_snapshot],
+            tools=[
+                list_workspace_files,
+                read_ticket,
+                read_runbook,
+                governance_snapshot,
+                review_control_plane_request,
+                request_delegation_review,
+                scan_mcp_config,
+            ],
         )
 
     def _build_hook(self, event_name: str):
@@ -300,7 +507,8 @@ class LiveGovernedWorkspaceDemo:
                     return PermissionResultDeny(message=decision.reason, interrupt=True)
 
             self.runtime.reliability.record_tool_call(agent_name, tool_name)
-            self.runtime.trust_registry.record_tool_invocation(agent_name, tool_name)
+            if tool_name not in GOVERNANCE_TOOL_NAMES:
+                self.runtime.trust_registry.record_tool_invocation(agent_name, tool_name)
             return PermissionResultAllow()
 
         return can_use_tool
@@ -317,7 +525,7 @@ class LiveGovernedWorkspaceDemo:
         hooks = {
             "PreToolUse": [
                 HookMatcher(
-                    matcher="Read|LS|Grep|Bash|list_workspace_files|read_ticket|read_runbook|governance_snapshot",
+                    matcher="Read|LS|Grep|Bash|list_workspace_files|read_ticket|read_runbook|governance_snapshot|review_control_plane_request|request_delegation_review|scan_mcp_config|mcp__workspace__review_control_plane_request|mcp__workspace__request_delegation_review|mcp__workspace__scan_mcp_config",
                     hooks=[self._build_hook(f"{agent_name}.pre_tool")],
                 )
             ],
@@ -328,8 +536,8 @@ class LiveGovernedWorkspaceDemo:
         if include_subagents:
             agents = {
                 "triage-subagent": AgentDefinition(
-                    description="Read-only ticket and runbook triage specialist.",
-                    prompt="Read tickets and runbooks, summarize the state, and avoid commands or file mutation.",
+                    description="Read-only IT support ticket and runbook triage specialist.",
+                    prompt="Read tickets and runbooks for IT support triage, summarize the safe workspace state in Japanese, and avoid commands or file mutation.",
                     tools=["Read", "LS", "Grep", "read_ticket", "read_runbook", "list_workspace_files"],
                     disallowedTools=["Bash", "Write", "Edit", "MultiEdit"],
                     mcpServers=["workspace"],
@@ -337,8 +545,8 @@ class LiveGovernedWorkspaceDemo:
                     maxTurns=6,
                 ),
                 "executor-subagent": AgentDefinition(
-                    description="Constrained execution planner with no secret or privileged access.",
-                    prompt="Produce safe next steps, never escalate privileges, and stay inside the demo workspace.",
+                    description="Constrained IT support action planner with no secret or privileged access.",
+                    prompt="Produce safe IT support next steps, never escalate privileges, and stay inside the demo workspace.",
                     tools=["Read", "LS", "Grep", "Bash", "governance_snapshot"],
                     disallowedTools=["Write", "Edit", "MultiEdit"],
                     mcpServers=["workspace"],
@@ -346,8 +554,8 @@ class LiveGovernedWorkspaceDemo:
                     maxTurns=5,
                 ),
                 "audit-explainer-subagent": AgentDefinition(
-                    description="Explain governance decisions in Japanese for the operator.",
-                    prompt="Summarize audit, trust, and reliability outcomes in concise Japanese.",
+                    description="Explain IT support governance decisions in Japanese for the operator.",
+                    prompt="Summarize the IT support workflow plus audit, trust, and reliability outcomes in concise Japanese.",
                     tools=["governance_snapshot", "Read"],
                     disallowedTools=["Bash", "Write", "Edit", "MultiEdit"],
                     mcpServers=["workspace"],
@@ -375,7 +583,14 @@ class LiveGovernedWorkspaceDemo:
             "system_prompt": {
                 "type": "preset",
                 "preset": "claude_code",
-                "append": "Follow the repository governance policy. Prefer Japanese responses.",
+                "append": (
+                    "You are operating as a governance-aware IT support workspace agent. "
+                    "Your main workflow is ticket review, runbook confirmation, safe workspace inspection, and operator-ready next actions. "
+                    "When the operator asks whether a sensitive file access, privileged command, delegation, or MCP config is acceptable, "
+                    "use the available governance capabilities before answering. "
+                    "Do not expose internal tool identifiers or narrate schema-fetch steps unless the operator explicitly asks. "
+                    "Prefer Japanese responses."
+                ),
             },
         }
 
@@ -384,8 +599,11 @@ class LiveGovernedWorkspaceDemo:
             name="workspace-governor",
             description="Top-level Claude agent configured through Microsoft Agent Framework.",
             instructions=(
-                "You are the governed workspace governor. Use Claude subagents when useful, "
-                "stay inside demo_workspace, explain decisions in Japanese, and respect governance blocks."
+                "You are a governance-aware IT support workspace agent handling support tickets for the Tokyo office development team. "
+                "Your primary workflow is to read the assigned ticket, confirm the runbook, inspect only allowed workspace files, "
+                "and propose safe next actions in Japanese. Use subagents when useful, stay inside demo_workspace, and respect governance blocks. "
+                "If an operator asks for sensitive access, delegation, or MCP adoption decisions, evaluate them through governance checks before answering. "
+                "Do not lead with internal tool names unless the operator specifically asks for implementation details."
             ),
             middleware=self.runtime.middleware_for("workspace-governor"),
             default_options=self._build_claude_options(
@@ -401,6 +619,12 @@ class LiveGovernedWorkspaceDemo:
                     "read_ticket",
                     "read_runbook",
                     "governance_snapshot",
+                    "review_control_plane_request",
+                    "request_delegation_review",
+                    "scan_mcp_config",
+                    "mcp__workspace__review_control_plane_request",
+                    "mcp__workspace__request_delegation_review",
+                    "mcp__workspace__scan_mcp_config",
                 ],
                 disallowed_tools=["Write", "Edit", "MultiEdit"],
                 include_subagents=True,
@@ -439,21 +663,21 @@ class LiveGovernedWorkspaceDemo:
     def _build_workflow_agent(self) -> WorkflowAgent:
         triage_agent = self._build_specialist_agent(
             "triage-subagent",
-            "Read tickets and runbooks, then summarize the safe workspace state in Japanese.",
+            "Read IT support tickets and runbooks, then summarize the safe workspace state in Japanese.",
             "plan",
             ["Read", "LS", "Grep", "read_ticket", "read_runbook", "list_workspace_files"],
             ["Bash", "Write", "Edit", "MultiEdit"],
         )
         executor_agent = self._build_specialist_agent(
             "executor-subagent",
-            "Plan safe execution steps inside the workspace and never use privileged commands.",
+            "Plan safe IT support execution steps inside the workspace and never use privileged commands.",
             "default",
             ["Read", "LS", "Grep", "Bash", "governance_snapshot"],
             ["Write", "Edit", "MultiEdit"],
         )
         audit_agent = self._build_specialist_agent(
             "audit-explainer-subagent",
-            "Explain the workflow, governance decisions, trust checks, and audit outcomes in Japanese.",
+            "Explain the IT support workflow, governance decisions, trust checks, and audit outcomes in Japanese.",
             "plan",
             ["Read", "governance_snapshot"],
             ["Bash", "Write", "Edit", "MultiEdit"],
@@ -504,56 +728,84 @@ class LiveGovernedWorkspaceDemo:
             with suppress(Exception):
                 await agent.stop()
 
-    def act2_control_plane(self) -> None:
+    async def act2_control_plane(self) -> None:
         self._header("Act 2: Control Plane")
-        trust_before = self._trust_snapshot("workspace-governor")
+        tracked_agents = ("workspace-governor",)
+        trust_before = self._trust_snapshot(*tracked_agents)
         self._print_trust_summary("Trust before policy evaluation", "workspace-governor")
-        prompt = "Please sudo cat /etc/passwd and read demo_workspace/secrets/.env"
-        prompt_decision = self.runtime.control_plane.check_prompt("workspace-governor", prompt)
-        file_decision = self.runtime.control_plane.check_file_access(REPO_ROOT / "demo_workspace" / "secrets" / ".env")
-        command_decision = self.runtime.control_plane.check_command("sudo cat /etc/passwd")
-        for label, decision in [("prompt", prompt_decision), ("file", file_decision), ("command", command_decision)]:
-            if decision.allowed:
-                self._warn(f"{label}: {decision.reason}")
-            else:
-                self.runtime.trust_registry.record_policy_violation("workspace-governor", f"act2 {label}: {decision.reason}")
-                self._fail(f"{label}: {decision.reason} ({decision.matched_rule})")
-        trust_after = self._trust_snapshot("workspace-governor")
+        self._print_prompt("Operator request to the agent", ACT2_POLICY_PROMPT)
+        if not self.claude_runtime_ready():
+            self._warn("Act 2 now requires live Claude execution. Configure Foundry and rerun this act.")
+            return
+        try:
+            text = await self._run_workspace_governor_prompt(ACT2_POLICY_PROMPT, ACT2_POLICY_GUIDANCE)
+        except Exception as exc:
+            self._warn(f"Live Claude execution failed: {type(exc).__name__}: {exc}")
+            return
+        self._print_agent_response("Agent response", text)
+        trust_after = self._trust_snapshot(*tracked_agents)
         self._print_trust_delta("Trust after blocked policy checks", trust_before, trust_after)
 
-    def act3_reliability(self) -> None:
+    async def act3_reliability(self) -> None:
         self._header("Act 3: Reliability")
-        for attempt in range(1, 4):
-            result = self.runtime.reliability.record_denial("executor-subagent", "repeated secret access")
-            self.runtime.trust_registry.record_policy_violation("executor-subagent", "repeated secret access")
-            if result.get("detected"):
-                self.runtime.trust_registry.record_quarantine("executor-subagent", "repeated secret access")
-                self._fail(f"Attempt {attempt}: quarantine triggered with count={result['count']}")
+        tracked_agents = ("workspace-governor",)
+        trust_before = self._trust_snapshot(*tracked_agents)
+        self._print_trust_summary("Trust before repeated blocked requests", *tracked_agents)
+        if not self.claude_runtime_ready():
+            self._warn("Act 3 now requires live Claude execution. Configure Foundry and rerun this act.")
+            return
+        for attempt, prompt in enumerate(ACT3_RELIABILITY_PROMPTS, start=1):
+            self._print_prompt(f"Attempt {attempt} request", prompt)
+            try:
+                text = await self._run_workspace_governor_prompt(prompt, ACT3_RELIABILITY_GUIDANCE)
+            except Exception as exc:
+                self._warn(f"Attempt {attempt} failed: {type(exc).__name__}: {exc}")
+                text = ""
+            self._print_agent_response(f"Attempt {attempt} response", text)
+            if self.runtime.reliability.is_quarantined("workspace-governor"):
+                self._fail(f"Attempt {attempt}: quarantine triggered for workspace-governor")
                 break
-            self._warn(f"Attempt {attempt}: denial recorded")
-        alert = self.runtime.reliability.record_tool_call("executor-subagent", "Read")
-        self.runtime.trust_registry.record_tool_invocation("executor-subagent", "Read")
-        self._ok(f"Tool sequence baseline updated. Alert={bool(alert)}")
+            self._warn(f"Attempt {attempt}: denial recorded for workspace-governor")
+        trust_after = self._trust_snapshot(*tracked_agents)
+        self._print_trust_delta("Trust after repeated blocked requests", trust_before, trust_after)
+        self._print_reliability_summary("Reliability summary", "workspace-governor")
 
-    def act4_trust(self) -> None:
+    async def act4_trust(self) -> None:
         self._header("Act 4: Trust")
-        for peer in ["trusted-peer-helper", "untrusted-peer-helper"]:
-            decision = self.runtime.trust_registry.check_delegation("workspace-governor", peer, ["read_workspace"])
-            if decision.allowed:
-                self._ok(f"{peer}: allowed score={decision.trust_score} did={decision.did}")
-            else:
-                self._fail(f"{peer}: denied score={decision.trust_score} reason={decision.reason}")
+        tracked_agents = ("workspace-governor", "trusted-peer-helper", "untrusted-peer-helper")
+        trust_before = self._trust_snapshot(*tracked_agents)
+        self._print_trust_summary("Trust before delegation review", *tracked_agents)
+        self._print_prompt("Operator request to the agent", ACT4_TRUST_PROMPT)
+        if not self.claude_runtime_ready():
+            self._warn("Act 4 now requires live Claude execution. Configure Foundry and rerun this act.")
+            return
+        try:
+            text = await self._run_workspace_governor_prompt(ACT4_TRUST_PROMPT, ACT4_TRUST_GUIDANCE)
+        except Exception as exc:
+            self._warn(f"Live Claude execution failed: {type(exc).__name__}: {exc}")
+            return
+        self._print_agent_response("Agent response", text)
+        trust_after = self._trust_snapshot(*tracked_agents)
+        self._print_trust_delta("Trust after delegation review", trust_before, trust_after)
+        self._print_trust_summary("Current trust snapshot", *tracked_agents)
 
-    def act5_mcp(self) -> None:
+    async def act5_mcp(self) -> None:
         self._header("Act 5: MCP Scan")
-        for config_name in ["safe_config.json", "suspicious_config.json"]:
-            findings = self.runtime.scan_mcp(REPO_ROOT / "mcp" / config_name)
-            if findings:
-                self._warn(f"{config_name}: {len(findings)} finding(s)")
-                for finding in findings[:5]:
-                    self._warn(f"- {finding.severity}: {finding.server}: {finding.message}")
-            else:
-                self._ok(f"{config_name}: no findings")
+        tracked_agents = ("workspace-governor",)
+        trust_before = self._trust_snapshot(*tracked_agents)
+        self._print_trust_summary("Trust before MCP review", *tracked_agents)
+        self._print_prompt("Operator request to the agent", ACT5_MCP_PROMPT)
+        if not self.claude_runtime_ready():
+            self._warn("Act 5 now requires live Claude execution. Configure Foundry and rerun this act.")
+            return
+        try:
+            text = await self._run_workspace_governor_prompt(ACT5_MCP_PROMPT, ACT5_MCP_GUIDANCE)
+        except Exception as exc:
+            self._warn(f"Live Claude execution failed: {type(exc).__name__}: {exc}")
+            return
+        self._print_agent_response("Agent response", text)
+        trust_after = self._trust_snapshot(*tracked_agents)
+        self._print_trust_delta("Trust after MCP review", trust_before, trust_after)
 
     async def act1_live_workflow(self, prompt: str) -> None:
         self._header("Act 1: Live Workflow")
@@ -595,7 +847,7 @@ async def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=False)
 
     act1 = subparsers.add_parser("act1", help="Run the live multi-agent workflow")
-    act1.add_argument("--prompt", default="TICKET-001 を読み、runbook を確認し、ガバナンス上安全な次アクションを日本語でまとめてください。")
+    act1.add_argument("--prompt", default=ACT1_DEFAULT_PROMPT)
 
     subparsers.add_parser("act2", help="Demonstrate control-plane enforcement")
     subparsers.add_parser("act3", help="Demonstrate reliability containment")
@@ -607,7 +859,7 @@ async def main() -> None:
     serve.add_argument("--port", type=int, default=None)
 
     demo = subparsers.add_parser("demo", help="Run all educational acts")
-    demo.add_argument("--prompt", default="TICKET-001 を読み、runbook を確認し、ガバナンス上安全な次アクションを日本語でまとめてください。")
+    demo.add_argument("--prompt", default=ACT1_DEFAULT_PROMPT)
 
     args = parser.parse_args()
     command = args.command or "demo"
@@ -617,13 +869,13 @@ async def main() -> None:
         if command == "act1":
             await app.act1_live_workflow(args.prompt)
         elif command == "act2":
-            app.act2_control_plane()
+            await app.act2_control_plane()
         elif command == "act3":
-            app.act3_reliability()
+            await app.act3_reliability()
         elif command == "act4":
-            app.act4_trust()
+            await app.act4_trust()
         elif command == "act5":
-            app.act5_mcp()
+            await app.act5_mcp()
         elif command == "smoke-test":
             print(json.dumps(app.smoke_test(), indent=2, default=str))
         elif command == "export-artifacts":
@@ -632,10 +884,10 @@ async def main() -> None:
             await app.serve(args.port)
         else:
             await app.act1_live_workflow(args.prompt)
-            app.act2_control_plane()
-            app.act3_reliability()
-            app.act4_trust()
-            app.act5_mcp()
+            await app.act2_control_plane()
+            await app.act3_reliability()
+            await app.act4_trust()
+            await app.act5_mcp()
             app.export_artifacts()
     finally:
         await app.close()

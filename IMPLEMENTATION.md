@@ -25,6 +25,12 @@ The working implementation now lives in:
   - `agentmesh.AgentMeshClient` metadata/DIDs
   - `agent_sre.anomaly.AnomalyDetector`
   - `agent_os.cli.mcp_scan.scan_config`
+- Reworked Acts 2-5 so they are no longer direct CLI-side subsystem checks:
+  - The core framing remains an IT support ticket workflow: ticket review, runbook confirmation, and safe next actions
+  - Act 2 invokes governance review inside that workflow when the operator asks for risky extra access
+  - Act 3 accumulates live denials through repeated risky follow-up requests in the same support case
+  - Act 4 invokes trust delegation review when deciding whether to share the investigation with a helper agent
+  - Act 5 invokes MCP scanning when choosing a safe MCP configuration for the support workflow
 
 ## Compatibility shim
 

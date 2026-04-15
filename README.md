@@ -13,7 +13,7 @@ The previous hand-written simulator has been replaced in the runtime path. The l
 
 ## What is implemented
 
-- A top-level `workspace-governor` Claude agent built through MAF
+- A top-level `workspace-governor` Claude agent built through MAF and framed as an IT support workspace agent
 - Claude-side custom subagent definitions for:
   - `triage-subagent`
   - `executor-subagent`
@@ -24,6 +24,10 @@ The previous hand-written simulator has been replaced in the runtime path. The l
   - MCP server attachment
   - tool permission callback
   - hook callbacks for tool/subagent events
+- Governance MCP tools exposed to the agent for integrated demos:
+  - control-plane review tool
+  - delegation review tool
+  - MCP config scan tool
 - MAF multi-agent workflow built with core `WorkflowBuilder` + `WorkflowAgent`
 - Agent Governance runtime using current installed APIs:
   - control-plane compatibility middleware over the repo YAML policy files
@@ -51,13 +55,13 @@ python app/demo.py act5
 python app/demo.py serve
 ```
 
-`demo` runs five educational acts:
+`demo` runs five educational acts around the same IT support scenario for `TICKET-001`:
 
-1. Live workflow or smoke-test fallback
-2. Control-plane blocking
-3. Reliability / quarantine behavior
-4. Trust-based delegation
-5. Official MCP scanner
+1. Ticket review, runbook confirmation, and safe next-action summary
+2. A risky follow-up request in the same support flow that is blocked by the control plane
+3. Repeated risky follow-up requests that trigger reliability quarantine tracking
+4. A support-task delegation decision evaluated through trust governance
+5. MCP configuration selection for the same support case, evaluated through governance scanning
 
 ## Live Claude execution
 
@@ -73,9 +77,20 @@ Optional authentication:
 - `ANTHROPIC_FOUNDRY_API_KEY` for API key auth
 - if omitted, the Claude process can use Entra ID via Azure CLI / managed identity / other credential sources supported by Foundry
 
-Without a Foundry target, Act 1 falls back to a construction-only smoke test so the rest of the governance demo still runs.
+Without a Foundry target, Act 1 falls back to a construction-only smoke test. Acts 2-5 now depend on live Claude execution because they are implemented as integrated agent scenarios rather than direct local function demos.
 
 The Claude child process now receives Foundry-specific environment variables from `.env` through `default_options["env"]`, including model pins and PowerShell tool configuration.
+
+## Integrated governance scenarios
+
+Acts 2-5 no longer call governance subsystems directly from the CLI entrypoint.
+
+- Act 2 keeps the IT support context intact and shows how a risky operator follow-up is formally denied by governance.
+- Act 3 keeps the same support case active and shows how repeated denied requests degrade reliability and trigger quarantine.
+- Act 4 shows how the agent evaluates whether a helper can safely share the TICKET-001 investigation workload.
+- Act 5 shows how the agent evaluates candidate MCP configurations before recommending one for the support workflow.
+
+This keeps the ticket triage and safe-action workflow as the mainline experience while making Acts 2-5 show governance firing inside realistic agent activity rather than as standalone direct checks.
 
 ## Artifacts
 
