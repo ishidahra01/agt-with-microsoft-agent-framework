@@ -9,14 +9,20 @@ This repository now uses the real package stack the original design called for:
   - `agent_sre` for anomaly detection
   - `agent_os` official MCP scanner for MCP safety checks
 
-The previous hand-written simulator has been replaced in the runtime path. The live entrypoint is [app/demo.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/demo.py).
+The previous hand-written simulator has been replaced in the runtime path. The live entrypoint is [app/demo.py](app/demo.py).
 
-For a repo-consumer view of what each demo act is trying to show, what successful behavior looks like, and how to interpret the result, see [DEMO_GUIDE.md](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/DEMO_GUIDE.md).
+## Documentation
+
+- **[Quick Start Guide](QUICKSTART.md)** - Get started quickly with installation and basic usage
+- **[Demo Guide](docs/DEMO_GUIDE.md)** - Detailed explanation of each demo act and success criteria
+- **[Architecture](docs/ARCHITECTURE.md)** - System architecture, components, and design decisions
+- **[Implementation Notes](docs/IMPLEMENTATION.md)** - Technical implementation details for developers
+- **[Observability Setup](docs/OBSERVABILITY.md)** - How to configure telemetry and tracing
 
 ## What is implemented
 
 - A top-level `workspace-governor` Claude agent built through MAF and framed as an IT support workspace agent
-- Claude SDK subagents defined programmatically in [app/demo.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/demo.py) using `AgentDefinition` for:
+- Claude SDK subagents defined programmatically in [app/demo.py](app/demo.py) using `AgentDefinition` for:
   - `triage-subagent`
   - `executor-subagent`
   - `audit-explainer-subagent`
@@ -55,27 +61,46 @@ The runtime is now intentionally centered on a single top-level Claude agent plu
 
 This removes the extra WorkflowAgent orchestration layer and keeps the demo focused on Claude SDK delegation plus governance enforcement.
 
+For detailed architecture information, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Run
 
+Available commands:
+
 ```bash
+# Construct the stack without model execution (smoke test)
 python app/demo.py smoke-test
+
+# Run all educational acts in sequence
 python app/demo.py demo
-python app/demo.py act5
-python app/demo.py serve
+
+# Run individual acts
+python app/demo.py act1         # Live workflow
+python app/demo.py act1b        # Explicit subagent delegation
+python app/demo.py act2         # Control-plane enforcement
+python app/demo.py act3         # Reliability containment
+python app/demo.py act4         # Trust checks
+python app/demo.py act5         # MCP scanner
+
+# Start HTTP endpoint
+python app/demo.py serve --port 8088
+
+# Export artifacts only
+python app/demo.py export-artifacts
 ```
 
-`demo` runs six educational acts around the same IT support scenario for `TICKET-001`:
+The `demo` command runs all six educational acts around the same IT support scenario for `TICKET-001`:
 
-1. Ticket review, runbook confirmation, and safe next-action summary
-2. Explicit Claude SDK subagent delegation through the `Agent` tool
-3. A risky follow-up request in the same support flow that is blocked by the control plane
-4. Repeated risky follow-up requests that trigger reliability quarantine tracking
-5. A support-task delegation decision evaluated through trust governance
-6. MCP configuration selection for the same support case, evaluated through governance scanning
+1. **Act 1**: Ticket review, runbook confirmation, and safe next-action summary
+2. **Act 1B**: Explicit Claude SDK subagent delegation through the `Agent` tool
+3. **Act 2**: A risky follow-up request in the same support flow that is blocked by the control plane
+4. **Act 3**: Repeated risky follow-up requests that trigger reliability quarantine tracking
+5. **Act 4**: A support-task delegation decision evaluated through trust governance
+6. **Act 5**: MCP configuration selection for the same support case, evaluated through governance scanning
 
 ## Live Claude execution
 
-Create a local `.env` from [`.env.example`](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/.env.example).
+Create a local `.env` from [`.env.example`](.env.example).
 
 For actual app execution, the Claude and Foundry settings are the baseline required configuration. The OTEL and Langfuse settings in `.env.example` are optional and are only needed if you want observability.
 
@@ -135,7 +160,7 @@ Notes:
 - Python tracing auto-follows the Claude trace settings when `APP_ENABLE_PYTHON_TRACING` is unset, so it is not required in the minimal `.env`.
 - If `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set, the app builds `Authorization=Basic ...` for OTLP headers at startup so you do not need to pre-encode them in `.env`.
 - Sensitive content export is opt-in through `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`, and `OTEL_LOG_TOOL_CONTENT`.
-- For backend-specific setup, see [observability/README.md](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/observability/README.md).
+- For backend-specific setup, see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 What this gives you:
 
@@ -160,7 +185,7 @@ The Python runtime now injects W3C trace context into the Claude child process t
 The Claude-specific customization now follows the current SDK guidance:
 
 - Skills are defined only as Markdown artifacts in `app/.claude/skills/.../SKILL.md`
-- The runtime loads those Skills by setting `cwd` to [app](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app) and `setting_sources=["project"]`
+- The runtime loads those Skills by setting `cwd` to [app](app) and `setting_sources=["project"]`
 - Subagents are defined in code with `AgentDefinition`, which is the SDK-recommended path for applications
 - The older JSON files under `app/.claude/...` were removed because they were non-standard for SDK Skills. `app/.claude` now contains only the Markdown Skill artifacts the SDK expects.
 
@@ -177,27 +202,27 @@ This keeps the ticket triage and safe-action workflow as the mainline experience
 
 ## Repository layout
 
-- [app](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app) contains the agent application itself, including Claude settings, runtime code, policies, and MCP sample definitions.
-- [demo_workspace](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/demo_workspace) stays outside the app as the stand-in for an external workspace or storage target that the agent operates on.
-- [artifacts](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts) contains run output and exported state.
+- [app](app) contains the agent application itself, including Claude settings, runtime code, policies, and MCP sample definitions.
+- [demo_workspace](demo_workspace) stays outside the app as the stand-in for an external workspace or storage target that the agent operates on.
+- [artifacts](artifacts) contains run output and exported state.
 
 ## Artifacts
 
 Running `python app/demo.py demo` exports:
 
-- [artifacts/audit-log.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/audit-log.json)
-- [artifacts/governance-snapshot.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/governance-snapshot.json)
+- [artifacts/audit-log.json](artifacts/audit-log.json)
+- [artifacts/governance-snapshot.json](artifacts/governance-snapshot.json)
 
 Dynamic trust state is also persisted incrementally at:
 
-- [artifacts/trust-state.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/trust-state.json)
+- [artifacts/trust-state.json](artifacts/trust-state.json)
 
 ## Repository focus
 
-- [app/demo.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/demo.py): live entrypoint, Claude/MAF wiring, subagent and governance configuration
-- [app/governance/runtime.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/governance/runtime.py): governance compatibility runtime on top of current AGT packages
-- [app/policies/control_plane.yaml](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/policies/control_plane.yaml): control-plane rules
-- [app/policies/trust_identity.yaml](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/policies/trust_identity.yaml): trust rules and peer metadata
-- [app/policies/reliability.yaml](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/policies/reliability.yaml): anomaly thresholds
-- [app/mcp/safe_config.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/mcp/safe_config.json): scanner-safe MCP example
-- [app/mcp/suspicious_config.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/mcp/suspicious_config.json): scanner-detectable unsafe MCP example
+- [app/demo.py](app/demo.py): live entrypoint, Claude/MAF wiring, subagent and governance configuration
+- [app/governance/runtime.py](app/governance/runtime.py): governance compatibility runtime on top of current AGT packages
+- [app/policies/control_plane.yaml](app/policies/control_plane.yaml): control-plane rules
+- [app/policies/trust_identity.yaml](app/policies/trust_identity.yaml): trust rules and peer metadata
+- [app/policies/reliability.yaml](app/policies/reliability.yaml): anomaly thresholds
+- [app/mcp/safe_config.json](app/mcp/safe_config.json): scanner-safe MCP example
+- [app/mcp/suspicious_config.json](app/mcp/suspicious_config.json): scanner-detectable unsafe MCP example

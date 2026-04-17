@@ -8,7 +8,7 @@ pip install -r requirements.txt
 
 ## 2. Configure Microsoft Foundry
 
-Create a local `.env` from [`.env.example`](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/.env.example) and set either:
+Create a local `.env` from [`.env.example`](.env.example) and set either:
 
 - `ANTHROPIC_FOUNDRY_RESOURCE`
 - `ANTHROPIC_FOUNDRY_BASE_URL`
@@ -47,10 +47,12 @@ Expected behavior without Foundry target configuration:
 ## 5. Run a single act
 
 ```bash
-python app/demo.py act2
-python app/demo.py act4
-python app/demo.py act5
-python app/demo.py act1b
+python app/demo.py act1         # Live workflow
+python app/demo.py act1b        # Explicit subagent delegation
+python app/demo.py act2         # Control-plane enforcement
+python app/demo.py act3         # Reliability containment
+python app/demo.py act4         # Trust checks
+python app/demo.py act5         # MCP scanner
 ```
 
 ## 6. Enable live Claude execution
@@ -82,7 +84,7 @@ python app/demo.py act1 --prompt "TICKET-001 を読み、runbook を確認して
 ## 7. Claude SDK layout in this repo
 
 - Skills: `app/.claude/skills/*/SKILL.md`
-- Subagents: programmatic `AgentDefinition` instances in [app/demo.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/demo.py)
+- Subagents: programmatic `AgentDefinition` instances in [app/demo.py](app/demo.py)
 - Runtime wrapper: `from agent_framework_claude import ClaudeAgent` remains the construction path
 - App-owned policy files: `app/policies/`
 - App-owned MCP sample configs: `app/mcp/`
