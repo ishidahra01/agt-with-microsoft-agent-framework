@@ -227,12 +227,12 @@ The Python runtime now creates parent spans and passes W3C trace context into th
 
 Backend-specific setup files in this repo:
 
-- [observability/README.md](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/observability/README.md)
+- [observability/README.md](observability/README.md)
 
 ## What to inspect when behavior looks suspicious
 
-- Check [artifacts/audit-log.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/audit-log.json) to see which tools were actually called.
-- Check [artifacts/governance-snapshot.json](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/artifacts/governance-snapshot.json) to inspect trust and reliability state after the run.
+- Check [artifacts/audit-log.json](artifacts/audit-log.json) to see which tools were actually called.
+- Check [artifacts/governance-snapshot.json](artifacts/governance-snapshot.json) to inspect trust and reliability state after the run.
 - For Act 1B specifically, look for `Agent` tool usage and `SubagentStart` / `SubagentStop` events.
 - For Acts 2-5, look for the governance MCP tool calls rather than just the final prose.
 

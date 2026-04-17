@@ -6,8 +6,8 @@ The runtime path is no longer a mock governance simulator.
 
 The working implementation now lives in:
 
-- [app/demo.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/demo.py)
-- [app/governance/runtime.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/governance/runtime.py)
+- [app/demo.py](app/demo.py)
+- [app/governance/runtime.py](app/governance/runtime.py)
 
 ## What changed
 
@@ -50,25 +50,25 @@ Two package mismatches exist in the installed environment:
 1. `agent-framework-orchestrations` was referenced by MAF docs and lazy imports, but was not installable here.
 2. `agent_os.integrations.maf_adapter` imports old `agent_sre` symbols that do not exist in the installed `agent_sre` build.
 
-Because of those mismatches, the repo contains a local compatibility layer in [app/governance/runtime.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/governance/runtime.py) that preserves the intended architecture while staying on the installed official package APIs.
+Because of those mismatches, the repo contains a local compatibility layer in [app/governance/runtime.py](app/governance/runtime.py) that preserves the intended architecture while staying on the installed official package APIs.
 
 ## Claude Agent SDK implementation shape
 
 The repository now follows the current Claude Agent SDK split:
 
-- Skills are filesystem artifacts only. They live under `app/.claude/skills/<skill-name>/SKILL.md` and are discovered because `cwd` points at [app](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app) and `setting_sources=["project"]` is passed to the SDK.
-- Subagents are defined programmatically in [app/demo.py](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app/demo.py) with `AgentDefinition`, which is the SDK-recommended approach for app code.
+- Skills are filesystem artifacts only. They live under `app/.claude/skills/<skill-name>/SKILL.md` and are discovered because `cwd` points at [app](app) and `setting_sources=["project"]` is passed to the SDK.
+- Subagents are defined programmatically in [app/demo.py](app/demo.py) with `AgentDefinition`, which is the SDK-recommended approach for app code.
 - The top-level agent enables the `Skill` tool so project Skills can be invoked, and enables the `Agent` tool so Claude can delegate to programmatically defined subagents.
 - The audit explainer subagent explicitly opts into the `governance-explainer` Skill because subagents do not inherit parent Skills automatically.
 
 ## App boundary
 
-The repository now treats [app](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/app) as the application boundary:
+The repository now treats [app](app) as the application boundary:
 
 - `app/.claude/` contains Claude SDK customization.
 - `app/policies/` contains governance policy definitions loaded directly by the runtime.
 - `app/mcp/` contains MCP configuration samples used by the Act 5 scanner demo.
-- [demo_workspace](c:/Users/hishida/repo/agt-with-microsoft-agent-framework/demo_workspace) remains outside the app because it represents the external workspace or storage target the agent operates on.
+- [demo_workspace](demo_workspace) remains outside the app because it represents the external workspace or storage target the agent operates on.
 
 ## Validated locally
 
