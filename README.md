@@ -11,7 +11,13 @@ This repository now uses the real package stack the original design called for:
 
 The previous hand-written simulator has been replaced in the runtime path. The live entrypoint is [app/demo.py](app/demo.py).
 
-For a repo-consumer view of what each demo act is trying to show, what successful behavior looks like, and how to interpret the result, see [DEMO_GUIDE.md](DEMO_GUIDE.md).
+## Documentation
+
+- **[Quick Start Guide](QUICKSTART.md)** - Get started quickly with installation and basic usage
+- **[Demo Guide](docs/DEMO_GUIDE.md)** - Detailed explanation of each demo act and success criteria
+- **[Architecture](docs/ARCHITECTURE.md)** - System architecture, components, and design decisions
+- **[Implementation Notes](docs/IMPLEMENTATION.md)** - Technical implementation details for developers
+- **[Observability Setup](docs/OBSERVABILITY.md)** - How to configure telemetry and tracing
 
 ## What is implemented
 
@@ -55,23 +61,42 @@ The runtime is now intentionally centered on a single top-level Claude agent plu
 
 This removes the extra WorkflowAgent orchestration layer and keeps the demo focused on Claude SDK delegation plus governance enforcement.
 
+For detailed architecture information, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Run
 
+Available commands:
+
 ```bash
+# Construct the stack without model execution (smoke test)
 python app/demo.py smoke-test
+
+# Run all educational acts in sequence
 python app/demo.py demo
-python app/demo.py act5
-python app/demo.py serve
+
+# Run individual acts
+python app/demo.py act1         # Live workflow
+python app/demo.py act1b        # Explicit subagent delegation
+python app/demo.py act2         # Control-plane enforcement
+python app/demo.py act3         # Reliability containment
+python app/demo.py act4         # Trust checks
+python app/demo.py act5         # MCP scanner
+
+# Start HTTP endpoint
+python app/demo.py serve --port 8088
+
+# Export artifacts only
+python app/demo.py export-artifacts
 ```
 
-`demo` runs six educational acts around the same IT support scenario for `TICKET-001`:
+The `demo` command runs all six educational acts around the same IT support scenario for `TICKET-001`:
 
-1. Ticket review, runbook confirmation, and safe next-action summary
-2. Explicit Claude SDK subagent delegation through the `Agent` tool
-3. A risky follow-up request in the same support flow that is blocked by the control plane
-4. Repeated risky follow-up requests that trigger reliability quarantine tracking
-5. A support-task delegation decision evaluated through trust governance
-6. MCP configuration selection for the same support case, evaluated through governance scanning
+1. **Act 1**: Ticket review, runbook confirmation, and safe next-action summary
+2. **Act 1B**: Explicit Claude SDK subagent delegation through the `Agent` tool
+3. **Act 2**: A risky follow-up request in the same support flow that is blocked by the control plane
+4. **Act 3**: Repeated risky follow-up requests that trigger reliability quarantine tracking
+5. **Act 4**: A support-task delegation decision evaluated through trust governance
+6. **Act 5**: MCP configuration selection for the same support case, evaluated through governance scanning
 
 ## Live Claude execution
 
@@ -135,7 +160,7 @@ Notes:
 - Python tracing auto-follows the Claude trace settings when `APP_ENABLE_PYTHON_TRACING` is unset, so it is not required in the minimal `.env`.
 - If `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set, the app builds `Authorization=Basic ...` for OTLP headers at startup so you do not need to pre-encode them in `.env`.
 - Sensitive content export is opt-in through `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`, and `OTEL_LOG_TOOL_CONTENT`.
-- For backend-specific setup, see [observability/README.md](observability/README.md).
+- For backend-specific setup, see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 What this gives you:
 

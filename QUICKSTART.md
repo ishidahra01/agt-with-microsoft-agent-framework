@@ -47,10 +47,12 @@ Expected behavior without Foundry target configuration:
 ## 5. Run a single act
 
 ```bash
-python app/demo.py act2
-python app/demo.py act4
-python app/demo.py act5
-python app/demo.py act1b
+python app/demo.py act1         # Live workflow
+python app/demo.py act1b        # Explicit subagent delegation
+python app/demo.py act2         # Control-plane enforcement
+python app/demo.py act3         # Reliability containment
+python app/demo.py act4         # Trust checks
+python app/demo.py act5         # MCP scanner
 ```
 
 ## 6. Enable live Claude execution
