@@ -6,10 +6,10 @@
         "-m",
         "workspace_mcp",
         "--root",
-        "demo_workspace"
+        "../demo_workspace"
       ],
       "env": {
-        "WORKSPACE_ROOT": "demo_workspace"
+        "WORKSPACE_ROOT": "../demo_workspace"
       }
     }
   },

@@ -75,25 +75,44 @@ policies:
       description: "Executor subagent gets minimal tool set"
       agent: "executor-subagent"
       allowed_tools:
-        - "read_safe_file"
-        - "list_directory"
-        - "safe_command"
+        - "Read"
+        - "LS"
+        - "Grep"
+        - "Bash"
+        - "mcp__workspace__governance_snapshot"
       denied_tools:
-        - "arbitrary_shell"
-        - "file_write"
-        - "network_access"
+        - "Write"
+        - "Edit"
+        - "MultiEdit"
 
     - rule: limit_triage_tools
       description: "Triage subagent is read-only"
       agent: "triage-subagent"
       allowed_tools:
-        - "read_file"
-        - "list_files"
-        - "search_content"
+        - "Read"
+        - "LS"
+        - "Grep"
+        - "mcp__workspace__read_ticket"
+        - "mcp__workspace__read_runbook"
+        - "mcp__workspace__list_workspace_files"
       denied_tools:
-        - "write_file"
-        - "execute_command"
-        - "network_access"
+        - "Write"
+        - "Edit"
+        - "MultiEdit"
+        - "Bash"
+
+    - rule: limit_audit_tools
+      description: "Audit explainer stays read-only and may invoke the explanation skill"
+      agent: "audit-explainer-subagent"
+      allowed_tools:
+        - "Read"
+        - "Skill"
+        - "mcp__workspace__governance_snapshot"
+      denied_tools:
+        - "Write"
+        - "Edit"
+        - "MultiEdit"
+        - "Bash"
 
 # Audit configuration
 audit:

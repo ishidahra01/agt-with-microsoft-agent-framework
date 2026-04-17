@@ -708,14 +708,15 @@ class CapabilityGuardMiddleware(FunctionMiddleware):
 class GovernanceRuntime:
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root
+        self.app_root = repo_root / "app"
         self.audit_log = AuditLog()
-        self.control_plane = ControlPlanePolicy(repo_root / "policies" / "control_plane.yaml")
+        self.control_plane = ControlPlanePolicy(self.app_root / "policies" / "control_plane.yaml")
         self.trust_registry = TrustRegistry(
-            repo_root / "policies" / "trust_identity.yaml",
+            self.app_root / "policies" / "trust_identity.yaml",
             self.audit_log,
             repo_root / "artifacts" / "trust-state.json",
         )
-        self.reliability = ReliabilityMonitor(repo_root / "policies" / "reliability.yaml", self.audit_log)
+        self.reliability = ReliabilityMonitor(self.app_root / "policies" / "reliability.yaml", self.audit_log)
 
     def middleware_for(self, agent_id: str) -> list[Any]:
         return [

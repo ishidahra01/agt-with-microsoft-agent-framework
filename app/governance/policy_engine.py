@@ -31,8 +31,8 @@ class PolicyResult:
 class PolicyEngine:
     """System-enforced control plane for agent operations"""
 
-    def __init__(self, policy_dir: str = "policies"):
-        self.policy_dir = Path(policy_dir)
+    def __init__(self, policy_dir: str | Path | None = None):
+        self.policy_dir = Path(policy_dir) if policy_dir is not None else Path(__file__).resolve().parents[1] / "policies"
         self.policies = self._load_policies()
         self.audit_log = []
 

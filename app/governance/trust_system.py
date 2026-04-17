@@ -31,8 +31,8 @@ class TrustCheckResult:
 class TrustSystem:
     """Runtime trust evaluation for agent delegation"""
 
-    def __init__(self, policy_dir: str = "policies"):
-        self.policy_dir = Path(policy_dir)
+    def __init__(self, policy_dir: str | Path | None = None):
+        self.policy_dir = Path(policy_dir) if policy_dir is not None else Path(__file__).resolve().parents[1] / "policies"
         self.trust_config = self._load_trust_config()
 
     def _load_trust_config(self) -> Dict[str, Any]:
